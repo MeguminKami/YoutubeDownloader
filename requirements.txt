@@ -1,0 +1,5 @@
+# YouTube Downloader Pro - Dependencies
+# Updated to fix security vulnerabilities (CVEs)
+customtkinter>=5.2.0
+yt-dlp>=2024.07.07  # Fixed CVE-2023-46121, CVE-2024-22423, CVE-2024-38519, GHSA-3v33-3wmw-3785
+Pillow>=10.2.0  # Fixed CVE-2023-4863, CVE-2023-50447
