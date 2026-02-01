@@ -4,7 +4,7 @@ A feature-rich application for downloading YouTube videos and audio with playlis
 """
 
 import customtkinter as ctk
-import  
+import yt_dlp
 import threading
 import os
 from pathlib import Path
@@ -88,6 +88,7 @@ class YouTubeDownloaderApp(ctk.CTk):
         """Create all UI widgets"""
 
         # Main container with padding
+        # Chupa
         main_container = ctk.CTkFrame(self, fg_color="transparent")
         main_container.pack(fill="both", expand=True, padx=20, pady=20)
 
