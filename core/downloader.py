@@ -1,18 +1,24 @@
 """
-Download logic and yt-dlp interaction
-SECURITY HARDENED + FIXED VERSION
-- Ensures video downloads produce actual video files
-- Prevents path traversal attacks
-- Secure subprocess handling
+Download logic and yt-dlp interaction.
+
+This module implements a format-driven pipeline:
+- discover formats from `yt-dlp --list-formats URL`
+- classify combined/video-only/audio-only streams
+- build explicit download plans for selected quality
+- execute yt-dlp commands internally with progress/stage callbacks
 """
+import glob
 import os
+import re
+import shutil
 import subprocess
 import sys
-import shutil
-import glob
-import re
-from typing import Callable, Optional, List, Dict, Any
+import tempfile
 import urllib.parse
+from typing import Any, Callable, Dict, List, Optional
+
+
+from core.models import DownloadPlan
 
 # Security: Maximum allowed download size (10 GB)
 MAX_DOWNLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024
@@ -21,83 +27,96 @@ MAX_DOWNLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 SAFE_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+class DownloadPipelineError(RuntimeError):
+    """Base exception for user-facing download pipeline failures."""
+
+    def __init__(self, reason: str, code: str):
+        super().__init__(reason)
+        self.code = code
+
+
+class FormatDiscoveryError(DownloadPipelineError):
+    def __init__(self, reason: str):
+        super().__init__(reason, "format_discovery_failed")
+
+
+class NoCompatibleFormatError(DownloadPipelineError):
+    def __init__(self, reason: str):
+        super().__init__(reason, "no_compatible_format")
+
+
+class MissingFFmpegError(DownloadPipelineError):
+    def __init__(self, reason: str = "FFmpeg is required to merge video and audio streams."):
+        super().__init__(reason, "missing_ffmpeg")
+
+
+class DirectDownloadError(DownloadPipelineError):
+    def __init__(self, reason: str):
+        super().__init__(reason, "direct_download_failed")
+
+
+class MergeFailureError(DownloadPipelineError):
+    def __init__(self, reason: str):
+        super().__init__(reason, "merge_failed")
+
+
 def sanitize_filename(filename: str) -> str:
-    """
-    Security: Sanitize filename to prevent path traversal and injection attacks.
-    Removes or replaces dangerous characters.
-    """
+    """Sanitize filename to prevent traversal/injection attacks."""
     if not filename:
         return "download"
 
-    # Remove path separators and null bytes
     filename = filename.replace('/', '_').replace('\\', '_').replace('\x00', '')
-
-    # Remove other dangerous characters
     filename = SAFE_FILENAME_PATTERN.sub('_', filename)
-
-    # Remove leading/trailing dots and spaces (Windows restrictions)
     filename = filename.strip('. ')
 
-    # Limit length
     if len(filename) > 200:
         filename = filename[:200]
 
-    # Ensure we have something
     return filename if filename else "download"
 
-class VideoFormat:
-    """Represents a video format option"""
-    def __init__(self, format_id: str, height: int, fps: Optional[int], ext: str,
-                 vcodec: str, acodec: str, filesize: Optional[int] = None,
-                 has_audio: bool = False):
-        self.format_id = format_id
-        self.height = height
-        self.fps = fps
-        self.ext = ext
-        self.vcodec = vcodec
-        self.acodec = acodec
-        self.filesize = filesize
-        self.has_audio = has_audio  # Whether this format includes audio
-
-    def get_label(self) -> str:
-        """Get human-readable label for this format"""
-        label = f"{self.height}p"
-        if self.fps and self.fps > 30:
-            label += f" {self.fps}fps"
-        if self.ext:
-            label += f" ({self.ext.upper()})"
-        if self.filesize:
-            if self.filesize >= 1024 * 1024 * 1024:
-                label += f" ~{self.filesize / (1024*1024*1024):.1f}GB"
-            elif self.filesize >= 1024 * 1024:
-                label += f" ~{self.filesize / (1024*1024):.0f}MB"
-        return label
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for UI consumption"""
-        return {
-            'format_id': self.format_id,
-            'height': self.height,
-            'fps': self.fps,
-            'ext': self.ext,
-            'resolution': self.get_label(),
-            'filesize': self.filesize,
-            'has_audio': self.has_audio
-        }
-
-    def __repr__(self):
-        return f"VideoFormat({self.get_label()}, id={self.format_id})"
 
 class Downloader:
-    """Handles download operations with yt-dlp"""
+    """Handles download operations with yt-dlp."""
+
+    _DOWNLOAD_PERCENT_RE = re.compile(r"\[download\]\s+(?P<pct>\d+(?:\.\d+)?)%")
+    _DOWNLOAD_SPEED_RE = re.compile(r"\bat\s+(?P<speed>[^\s]+/s)")
+    _DOWNLOAD_ETA_RE = re.compile(r"\bETA\s+(?P<eta>[0-9:]+)")
+    _FPS_RE = re.compile(r"\b(?P<fps>\d+(?:\.\d+)?)fps\b", re.IGNORECASE)
+    _HEIGHT_RE = re.compile(r"(?:\d{2,5}x(?P<h1>\d{2,5})|(?P<h2>\d{3,4})p)")
+    _TBR_RE = re.compile(r"\b(?P<tbr>\d+(?:\.\d+)?)k\b", re.IGNORECASE)
+    _SIZE_RE = re.compile(r"~?\s*(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>[KMGT]i?B)")
 
     def __init__(self, progress_callback: Optional[Callable] = None):
         self.progress_callback = progress_callback
-        self.current_item_downloaded = 0
-        self.completed_bytes = 0
+
+    def _base_ydl_opts(self) -> Dict[str, Any]:
+        """Shared yt-dlp defaults for metadata extraction paths."""
+        return {
+            'retries': 10,
+            'fragment_retries': 10,
+            'extractor_retries': 5,
+            'file_access_retries': 3,
+            'concurrent_fragment_downloads': 1,
+            'http_chunk_size': 10 * 1024 * 1024,
+        }
+
+    def _yt_dlp_base_command(self) -> List[str]:
+        """Return preferred yt-dlp command form (binary or module fallback)."""
+        yt_dlp_bin = shutil.which('yt-dlp')
+        if yt_dlp_bin:
+            return [yt_dlp_bin]
+        return [sys.executable, '-m', 'yt_dlp']
+
+    def _emit_stage(self, progress_hook: Optional[Callable], stage: str):
+        if progress_hook:
+            progress_hook({'status': 'stage', 'stage': stage})
+
+    def has_ffmpeg(self) -> bool:
+        """Check ffmpeg availability for merge workflows."""
+        return bool(shutil.which('ffmpeg'))
 
     def extract_info(self, url: str):
-        """Extract video/playlist info without downloading"""
+        """Extract video/playlist info without downloading."""
         import yt_dlp
 
         ydl_opts = {
@@ -105,135 +124,293 @@ class Downloader:
             'no_warnings': True,
             'extract_flat': 'in_playlist',
         }
+        ydl_opts.update(self._base_ydl_opts())
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
 
     def get_available_video_formats(self, url: str) -> Dict[str, Any]:
         """
-        Fetch all available video formats for a URL.
-        Returns dict with 'video_formats' list of VideoFormat.to_dict() results.
+        Fetch and parse available formats using `yt-dlp --list-formats URL`.
 
-        CRITICAL: Only returns formats that have video codecs (vcodec != 'none')
-        This ensures video downloads produce actual video files.
-
-        Security: Validates URL before processing.
+        This output is treated as the source of truth for stream availability.
         """
-        import yt_dlp
+        if not url or not url.strip():
+            return {'video_formats': [], 'error': 'Please enter a YouTube URL'}
 
-        # Security: Basic URL validation
         if not self._is_valid_url(url):
             return {'video_formats': [], 'error': 'Invalid URL'}
 
         try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,  # Get full format info
-                'skip_download': True,
+            command = self._yt_dlp_base_command() + ['--list-formats', url]
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                creationflags=creationflags,
+                timeout=120,
+            )
+
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            if result.returncode != 0:
+                raise FormatDiscoveryError(output or 'yt-dlp failed to list formats')
+
+            all_formats = self.parse_list_formats_output(result.stdout)
+            if not all_formats:
+                raise FormatDiscoveryError('No parseable formats found in yt-dlp output')
+
+            quality_options = self.build_quality_options(all_formats)
+            if not quality_options:
+                raise NoCompatibleFormatError('No compatible video quality options were found')
+
+            return {
+                'video_formats': quality_options,
+                'all_formats': all_formats,
+                'error': None,
             }
+        except DownloadPipelineError as exc:
+            return {'video_formats': [], 'error': str(exc), 'error_code': exc.code}
+        except subprocess.TimeoutExpired:
+            return {'video_formats': [], 'error': 'Timed out while fetching formats'}
+        except Exception as exc:
+            return {'video_formats': [], 'error': str(exc)}
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+    def parse_list_formats_output(self, output: str) -> List[Dict[str, Any]]:
+        """Parse `yt-dlp --list-formats` table output into normalized stream entries."""
+        parsed: List[Dict[str, Any]] = []
+        lines = output.splitlines()
 
-                # Handle playlists - get first video's formats
-                if 'entries' in info and info['entries']:
-                    first_entry = next((e for e in info['entries'] if e), None)
-                    if first_entry:
-                        if 'formats' not in first_entry:
-                            # Need to fetch full info for this entry
-                            entry_url = first_entry.get('url') or first_entry.get('webpage_url')
-                            if entry_url:
-                                info = ydl.extract_info(entry_url, download=False)
-                        else:
-                            info = first_entry
+        seen_header = False
+        for raw_line in lines:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith('[info]'):
+                continue
+            if stripped.lower().startswith('format code'):
+                continue
+            if 'ID' in stripped and 'EXT' in stripped and 'RESOLUTION' in stripped:
+                seen_header = True
+                continue
+            if not seen_header:
+                continue
+            if set(stripped) == {'-'}:
+                continue
 
-                formats = info.get('formats', [])
+            parsed_line = self._parse_format_line(stripped)
+            if parsed_line:
+                parsed.append(parsed_line)
 
-                # Filter and parse video formats
-                video_formats = []
-                seen_qualities = set()
+        return parsed
 
-                for fmt in formats:
-                    # CRITICAL: Must have video codec (not 'none') and valid height
-                    # This prevents audio-only formats from appearing
-                    vcodec = fmt.get('vcodec', 'none')
-                    acodec = fmt.get('acodec', 'none')
-                    height = fmt.get('height')
+    def _parse_format_line(self, line: str) -> Optional[Dict[str, Any]]:
+        if '|' in line:
+            left, right = line.split('|', 1)
+            notes = right.strip()
+        else:
+            left = line
+            notes = ''
 
-                    if vcodec and vcodec != 'none' and height and height > 0:
-                        fps = fmt.get('fps')
-                        ext = fmt.get('ext', 'mp4')
-                        format_id = fmt.get('format_id', '')
-                        filesize = fmt.get('filesize') or fmt.get('filesize_approx')
-                        has_audio = acodec and acodec != 'none'
+        tokens = left.split()
+        if len(tokens) < 3:
+            return None
 
-                        # Create unique key for deduplication (prefer formats with audio)
-                        quality_key = (height, fps or 0, ext)
+        format_id = tokens[0].strip()
+        ext = tokens[1].strip()
+        left_rest = ' '.join(tokens[2:]).strip()
+        lower_full = f"{left_rest} {notes}".lower()
 
-                        # Skip if we've seen this quality, unless new one has audio and old didn't
-                        if quality_key in seen_qualities:
-                            continue
+        has_video = 'audio only' not in lower_full
+        has_audio = 'video only' not in lower_full
 
-                        video_format = VideoFormat(
-                            format_id=format_id,
-                            height=height,
-                            fps=fps,
-                            ext=ext,
-                            vcodec=vcodec,
-                            acodec=acodec,
-                            filesize=filesize,
-                            has_audio=has_audio
-                        )
+        if not has_video and not has_audio:
+            return None
 
-                        video_formats.append(video_format)
-                        seen_qualities.add(quality_key)
+        resolution = 'unknown'
+        if 'audio only' in lower_full:
+            resolution = 'audio only'
+        else:
+            match = self._HEIGHT_RE.search(left_rest)
+            if match:
+                if match.group('h1'):
+                    # Preserve WxH string where possible.
+                    wh_match = re.search(r'\d{2,5}x\d{2,5}', left_rest)
+                    resolution = wh_match.group(0) if wh_match else f"{match.group('h1')}p"
+                else:
+                    resolution = f"{match.group('h2')}p"
+            else:
+                resolution = left_rest.split()[0] if left_rest else 'unknown'
 
-                # Sort by height (descending), then fps (descending)
-                video_formats.sort(key=lambda f: (f.height, f.fps or 0), reverse=True)
+        return {
+            'format_id': format_id,
+            'ext': ext,
+            'resolution': resolution,
+            'height': self._extract_height(resolution),
+            'fps': self._extract_fps(left_rest + ' ' + notes),
+            'has_video': has_video,
+            'has_audio': has_audio,
+            'category': self._classify_category(has_video, has_audio),
+            'filesize': self._extract_size_bytes(notes),
+            'tbr_kbps': self._extract_tbr(notes),
+            'notes': notes,
+            'raw': line,
+        }
 
-                # Convert to dict format for UI
-                return {
-                    'video_formats': [f.to_dict() for f in video_formats],
-                    'title': info.get('title', 'Unknown'),
-                    'duration': info.get('duration'),
-                    'thumbnail': info.get('thumbnail')
-                }
+    def _classify_category(self, has_video: bool, has_audio: bool) -> str:
+        if has_video and has_audio:
+            return 'combined'
+        if has_video and not has_audio:
+            return 'video_only'
+        return 'audio_only'
 
-        except Exception as e:
-            print(f"Error fetching formats: {e}")
-            return {'video_formats': [], 'error': str(e)}
+    def _extract_height(self, resolution: str) -> Optional[int]:
+        if not resolution:
+            return None
+        match = self._HEIGHT_RE.search(resolution)
+        if not match:
+            return None
+        if match.group('h1'):
+            return int(match.group('h1'))
+        return int(match.group('h2')) if match.group('h2') else None
+
+    def _extract_fps(self, value: str) -> Optional[float]:
+        match = self._FPS_RE.search(value)
+        if not match:
+            return None
+        try:
+            return float(match.group('fps'))
+        except ValueError:
+            return None
+
+    def _extract_tbr(self, notes: str) -> Optional[float]:
+        match = self._TBR_RE.search(notes)
+        if not match:
+            return None
+        try:
+            return float(match.group('tbr'))
+        except ValueError:
+            return None
+
+    def _extract_size_bytes(self, notes: str) -> Optional[int]:
+        match = self._SIZE_RE.search(notes)
+        if not match:
+            return None
+
+        number = float(match.group('num'))
+        unit = match.group('unit').upper()
+        multiplier = {
+            'KB': 1000,
+            'MB': 1000 ** 2,
+            'GB': 1000 ** 3,
+            'TB': 1000 ** 4,
+            'KIB': 1024,
+            'MIB': 1024 ** 2,
+            'GIB': 1024 ** 3,
+            'TIB': 1024 ** 4,
+        }.get(unit)
+        if not multiplier:
+            return None
+        return int(number * multiplier)
+
+    def build_quality_options(self, formats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Create UI quality options grouped by resolution/height."""
+        audio_candidates = [f for f in formats if f['category'] == 'audio_only']
+        best_audio = max(audio_candidates, key=self._audio_score, default=None)
+
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for fmt in formats:
+            if fmt['category'] in ('combined', 'video_only') and fmt.get('height'):
+                grouped.setdefault(int(fmt['height']), []).append(fmt)
+
+        options: List[Dict[str, Any]] = []
+        for height, candidates in grouped.items():
+            best_video = max(candidates, key=self._video_score)
+            requires_merge = best_video['category'] == 'video_only'
+            audio_format_id = best_audio['format_id'] if requires_merge and best_audio else None
+
+            label = self._build_quality_label(best_video, requires_merge)
+            options.append({
+                'format_id': best_video['format_id'],
+                'height': height,
+                'fps': best_video.get('fps'),
+                'ext': best_video.get('ext'),
+                'resolution': label,
+                'filesize': best_video.get('filesize'),
+                'has_audio': best_video.get('has_audio', False),
+                'has_video': best_video.get('has_video', True),
+                'is_combined': best_video['category'] == 'combined',
+                'requires_merge': requires_merge,
+                'audio_format_id': audio_format_id,
+                'notes': best_video.get('notes', ''),
+            })
+
+        options.sort(key=lambda item: item.get('height') or 0, reverse=True)
+        return options
+
+    def _video_score(self, fmt: Dict[str, Any]) -> tuple:
+        return (
+            float(fmt.get('fps') or 0),
+            float(fmt.get('tbr_kbps') or 0),
+            int(fmt.get('filesize') or 0),
+            1 if fmt['category'] == 'combined' else 0,
+        )
+
+    def _audio_score(self, fmt: Dict[str, Any]) -> tuple:
+        return (
+            float(fmt.get('tbr_kbps') or 0),
+            int(fmt.get('filesize') or 0),
+        )
+
+    def _build_quality_label(self, fmt: Dict[str, Any], requires_merge: bool) -> str:
+        parts = []
+        height = fmt.get('height')
+        if height:
+            parts.append(f"{height}p")
+        else:
+            parts.append(str(fmt.get('resolution') or 'Unknown'))
+
+        fps = fmt.get('fps')
+        if fps and fps > 30:
+            parts.append(f"{int(fps)}fps")
+
+        ext = fmt.get('ext')
+        if ext:
+            parts.append(f"({str(ext).upper()})")
+
+        if fmt.get('filesize'):
+            size = fmt['filesize']
+            if size >= 1024 ** 3:
+                parts.append(f"~{size / (1024 ** 3):.1f}GB")
+            elif size >= 1024 ** 2:
+                parts.append(f"~{size / (1024 ** 2):.0f}MB")
+
+        parts.append('- requires audio merge' if requires_merge else '- ready to download directly')
+        return ' '.join(parts)
 
     def _is_valid_url(self, url: str) -> bool:
-        """
-        Security: Validate URL to prevent SSRF and other attacks.
-        Only allows http/https schemes and common video hosts.
-        """
+        """Validate URL to reduce malformed/unsafe input handling."""
         if not url or not isinstance(url, str):
             return False
 
         try:
             parsed = urllib.parse.urlparse(url.strip())
-
-            # Only allow http/https
             if parsed.scheme not in ('http', 'https'):
                 return False
-
-            # Must have a hostname
             if not parsed.netloc:
                 return False
 
-            # Block localhost and private IPs (basic SSRF prevention)
             hostname = parsed.hostname.lower() if parsed.hostname else ''
             blocked_hosts = ['localhost', '127.0.0.1', '0.0.0.0', '::1']
             if hostname in blocked_hosts:
                 return False
 
-            # Block private IP ranges
-            if hostname.startswith(('10.', '172.16.', '172.17.', '172.18.', '172.19.',
-                                    '172.20.', '172.21.', '172.22.', '172.23.', '172.24.',
-                                    '172.25.', '172.26.', '172.27.', '172.28.', '172.29.',
-                                    '172.30.', '172.31.', '192.168.')):
+            if hostname.startswith((
+                '10.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.',
+                '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.',
+                '172.29.', '172.30.', '172.31.', '192.168.'
+            )):
                 return False
 
             return True
@@ -241,11 +418,12 @@ class Downloader:
             return False
 
     def estimate_size(self, url: str, item_type: str, quality: str, audio_format: str) -> Optional[int]:
-        """Estimate total download size in bytes"""
+        """Estimate total download size in bytes (best-effort)."""
         try:
             import yt_dlp
 
             ydl_opts = {'quiet': True, 'no_warnings': True}
+            ydl_opts.update(self._base_ydl_opts())
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -254,227 +432,267 @@ class Downloader:
                     total_size = 0
                     for entry in info['entries']:
                         if entry:
-                            size = self._estimate_single_size(entry, item_type, quality, audio_format)
+                            size = self._estimate_single_size(entry, item_type, quality)
                             if size:
                                 total_size += size
                     return total_size if total_size > 0 else None
-                else:
-                    return self._estimate_single_size(info, item_type, quality, audio_format)
-        except:
+                return self._estimate_single_size(info, item_type, quality)
+        except Exception:
             return None
 
-    def _estimate_single_size(self, info: dict, item_type: str, quality: str, audio_format: str) -> Optional[int]:
-        """Estimate size for a single video"""
-        if item_type == "audio":
-            formats = info.get('formats', [])
-            for fmt in formats:
+    def _estimate_single_size(self, info: dict, item_type: str, quality: str) -> Optional[int]:
+        if item_type == 'audio':
+            for fmt in info.get('formats', []):
                 if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
                     size = fmt.get('filesize') or fmt.get('filesize_approx')
                     if size:
                         return int(size)
-        else:
-            # Video - quality is now format_id
-            formats = info.get('formats', [])
-            for fmt in formats:
-                if fmt.get('format_id') == quality:
-                    size = fmt.get('filesize') or fmt.get('filesize_approx')
-                    if size:
-                        return int(size)
+            return None
 
+        for fmt in info.get('formats', []):
+            if fmt.get('format_id') == quality:
+                size = fmt.get('filesize') or fmt.get('filesize_approx')
+                if size:
+                    return int(size)
         return None
 
+    def _build_download_plan(self, item) -> DownloadPlan:
+        if item.item_type == 'audio':
+            return DownloadPlan(mode='audio', selector='bestaudio/best', needs_merge=False)
+
+        selected_video = (item.quality or '').strip()
+        selected_audio = getattr(item, 'selected_audio_format_id', None)
+        requires_merge = bool(getattr(item, 'requires_merge', False))
+
+        # Rule A/B for explicit format selection from listed formats.
+        if selected_video:
+            if requires_merge:
+                if not selected_audio:
+                    raise NoCompatibleFormatError('No compatible audio-only stream found for this quality')
+                return DownloadPlan(
+                    mode='merge',
+                    selector=f"{selected_video}+{selected_audio}",
+                    needs_merge=True,
+                    video_format_id=selected_video,
+                    audio_format_id=selected_audio,
+                )
+            return DownloadPlan(
+                mode='direct',
+                selector=selected_video,
+                needs_merge=False,
+                video_format_id=selected_video,
+            )
+
+        # Rule C automatic capped-quality mode (playlist/fallback mode).
+        if getattr(item, 'height', None):
+            height = int(item.height)
+            return DownloadPlan(
+                mode='auto',
+                selector=f"bestvideo[height<={height}]+bestaudio/best[height<={height}]",
+                needs_merge=True,
+            )
+
+        return DownloadPlan(mode='auto', selector='bestvideo+bestaudio/best', needs_merge=True)
+
     def download_item(self, item, folder: str, progress_hook: Callable):
-        """
-        Download a single item.
-
-        FIXED: Video downloads now properly use format_id with explicit audio merge.
-        SECURITY: Sanitizes output filenames to prevent path traversal.
-        """
-        import yt_dlp
-
-        # Security: Ensure folder is a valid directory path
+        """Download a single item using explicit yt-dlp command execution."""
         folder = os.path.abspath(folder)
         if not os.path.isdir(folder):
             raise ValueError(f"Invalid download folder: {folder}")
 
-        # Security: Use sanitized output template
-        # %(title)s is sanitized by our custom output template function
-        ydl_opts = {
-            'outtmpl': os.path.join(folder, '%(title).200s.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
-            'progress_hooks': [progress_hook],
-            'restrictfilenames': True,  # Security: restrict to ASCII and safe chars
-            'windowsfilenames': True,   # Security: Windows-safe filenames
-        }
+        plan = self._build_download_plan(item)
+
+        if plan.needs_merge and not self.has_ffmpeg():
+            raise MissingFFmpegError('FFmpeg was not found. Install FFmpeg to download merge-required qualities.')
+
+        self._emit_stage(progress_hook, 'downloading selected quality')
+        if plan.needs_merge:
+            self._emit_stage(progress_hook, 'downloading video stream')
 
         temp_folder = None
-
-        if item.item_type == "audio":
-            ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': item.audio_format or '192',
-            }]
-        else:
-            # CRITICAL FIX: Video download - ensure we get actual video, not audio-only
-            #
-            # item.quality can be:
-            # 1. A format_id (e.g., "137", "248") - use directly with audio merge
-            # 2. A height value (e.g., "1080", "720") - use height-based format selection
-            # 3. None/empty - use best available
-
-            quality = item.quality
-            height = getattr(item, 'height', None)
-
-            if quality and not quality.isdigit():
-                # quality is a format_id - use it directly with audio merge
-                # Format: "{format_id}+bestaudio" ensures we get video+audio
-                ydl_opts['format'] = f"{quality}+bestaudio[ext=m4a]/bestaudio/{quality}"
-            elif height or (quality and quality.isdigit()):
-                # Height-based selection (for playlists or fallback)
-                h = height or int(quality)
-                # Select best video at or below specified height + best audio
-                ydl_opts['format'] = f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
-            else:
-                # Fallback - get best video+audio combination
-                ydl_opts['format'] = 'bestvideo+bestaudio/best'
-
-            # Force MP4 output for maximum compatibility
-            ydl_opts['merge_output_format'] = 'mp4'
+        outtmpl = os.path.join(folder, '%(title).200s.%(ext)s')
 
         if item.is_playlist and item.merge_playlist:
-            # Security: Use secure temp folder creation
-            import tempfile
             temp_folder = tempfile.mkdtemp(prefix='ytdl_playlist_', dir=folder)
-            ydl_opts['outtmpl'] = os.path.join(temp_folder, '%(playlist_index)03d - %(title).150s.%(ext)s')
+            outtmpl = os.path.join(temp_folder, '%(playlist_index)03d - %(title).150s.%(ext)s')
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([item.url])
+        cmd = self._yt_dlp_base_command() + [
+            '--retries', '10',
+            '--fragment-retries', '10',
+            '--extractor-retries', '5',
+            '--file-access-retries', '3',
+            '-f', plan.selector,
+            '-o', outtmpl,
+        ]
+
+        if item.item_type == 'audio':
+            cmd.extend(['-x', '--audio-format', 'mp3', '--audio-quality', str(item.audio_format or '192')])
+        elif plan.needs_merge:
+            cmd.extend(['--merge-output-format', 'mp4'])
+
+        cmd.append(item.url)
+
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=creationflags,
+        )
+
+        captured_lines: List[str] = []
+        emitted_audio_stage = False
+        emitted_merge_stage = False
+
+        for raw_line in process.stdout or []:
+            line = raw_line.strip()
+            if not line:
+                continue
+            captured_lines.append(line)
+
+            lower_line = line.lower()
+            if plan.needs_merge and not emitted_audio_stage and 'audio' in lower_line and 'destination' in lower_line:
+                emitted_audio_stage = True
+                self._emit_stage(progress_hook, 'downloading audio stream')
+
+            if plan.needs_merge and not emitted_merge_stage and (
+                '[merger]' in lower_line or 'merging formats into' in lower_line
+            ):
+                emitted_merge_stage = True
+                self._emit_stage(progress_hook, 'merging streams')
+
+            if '[download]' in line:
+                progress_payload: Dict[str, Any] = {'status': 'downloading'}
+                percent_match = self._DOWNLOAD_PERCENT_RE.search(line)
+                speed_match = self._DOWNLOAD_SPEED_RE.search(line)
+                eta_match = self._DOWNLOAD_ETA_RE.search(line)
+
+                if percent_match:
+                    progress_payload['percent'] = float(percent_match.group('pct'))
+                if speed_match:
+                    progress_payload['speed_text'] = speed_match.group('speed')
+                if eta_match:
+                    progress_payload['eta_text'] = eta_match.group('eta')
+
+                progress_hook(progress_payload)
+
+        process.wait()
+        output_text = '\n'.join(captured_lines)
+
+        if process.returncode != 0:
+            self._raise_download_failure(output_text, plan)
 
         if item.is_playlist and item.merge_playlist and temp_folder:
-            ext = "mp3" if item.item_type == "audio" else "mp4"
-            output_name = item.custom_name if item.custom_name else item.title
-            # Security: Sanitize filename to prevent path traversal
-            output_name = sanitize_filename(output_name)
+            ext = 'mp3' if item.item_type == 'audio' else 'mp4'
+            output_name = sanitize_filename(item.custom_name if item.custom_name else item.title)
             output_file = os.path.join(folder, f"{output_name}.{ext}")
 
+            self._emit_stage(progress_hook, 'merging streams')
             success = merge_playlist_files(temp_folder, output_file, ext)
-
             if success and os.path.exists(temp_folder):
                 try:
                     shutil.rmtree(temp_folder)
-                except:
+                except Exception:
                     pass
 
-            return success
+            if not success:
+                raise MergeFailureError('Failed to merge playlist files')
 
+        self._emit_stage(progress_hook, 'completed')
+        progress_hook({'status': 'finished'})
         return True
 
-def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
-    """
-    Merge all downloaded files into one using FFmpeg.
+    def _raise_download_failure(self, output: str, plan: DownloadPlan):
+        lower = output.lower()
 
-    SECURITY HARDENED:
-    - Uses absolute paths for ffmpeg
-    - Validates file paths
-    - Uses secure subprocess with shell=False
-    - Properly escapes file paths in concat list
-    """
+        if 'ffmpeg' in lower and ('not found' in lower or 'not installed' in lower or 'ffprobe and ffmpeg not found' in lower):
+            raise MissingFFmpegError('FFmpeg is missing. Install FFmpeg and retry merge-required downloads.')
+
+        if 'requested format is not available' in lower or 'no video formats found' in lower:
+            raise NoCompatibleFormatError('Requested format is no longer available for this video')
+
+        if plan.needs_merge and ('[merger]' in lower or 'unable to merge' in lower):
+            raise MergeFailureError('Download completed but merging streams failed')
+
+        if plan.needs_merge:
+            raise MergeFailureError('Merged download failed')
+        raise DirectDownloadError('Direct download failed')
+
+
+def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
+    """Merge all downloaded files into one using FFmpeg."""
     try:
-        # Security: Validate temp_folder is a directory
         temp_folder = os.path.abspath(temp_folder)
         if not os.path.isdir(temp_folder):
             raise ValueError(f"Invalid temp folder: {temp_folder}")
 
-        # Security: Validate output_file is within expected location
         output_file = os.path.abspath(output_file)
-
         patterns = ['*.mp3'] if ext == 'mp3' else ['*.mp4']
 
         files = []
         for pattern in patterns:
             files.extend(glob.glob(os.path.join(temp_folder, pattern)))
-
         files.sort()
 
         if not files:
-            raise Exception("No files found to merge")
+            raise RuntimeError('No files found to merge')
 
-        # Security: Validate all files are within temp_folder
-        for f in files:
-            f_abs = os.path.abspath(f)
-            if not f_abs.startswith(temp_folder):
-                raise ValueError(f"Invalid file path detected: {f}")
+        for file_path in files:
+            file_abs = os.path.abspath(file_path)
+            if not file_abs.startswith(temp_folder):
+                raise ValueError(f"Invalid file path detected: {file_path}")
 
         list_file = os.path.join(temp_folder, 'filelist.txt')
-
-        # Security: Write file list with proper escaping for FFmpeg concat
-        # FFmpeg concat demuxer requires specific escaping
-        with open(list_file, 'w', encoding='utf-8') as f:
+        with open(list_file, 'w', encoding='utf-8') as file_handle:
             for file_path in files:
-                # FFmpeg concat requires single quotes and escaping of single quotes and backslashes
                 safe_path = file_path.replace('\\', '/').replace("'", "'\\''")
-                f.write(f"file '{safe_path}'\n")
+                file_handle.write(f"file '{safe_path}'\n")
 
-        # Security: Find ffmpeg in PATH or use absolute path
         ffmpeg_path = shutil.which('ffmpeg')
         if not ffmpeg_path:
-            # Try common locations
-            common_paths = [
-                r'C:\ffmpeg\bin\ffmpeg.exe',
-                r'C:\Program Files\ffmpeg\bin\ffmpeg.exe',
-                '/usr/bin/ffmpeg',
-                '/usr/local/bin/ffmpeg'
-            ]
-            for path in common_paths:
-                if os.path.isfile(path):
-                    ffmpeg_path = path
-                    break
-
-        if not ffmpeg_path:
-            raise Exception("FFmpeg not found. Please install FFmpeg and add it to PATH.")
+            raise RuntimeError('FFmpeg not found. Please install FFmpeg and add it to PATH.')
 
         ffmpeg_cmd = [
             ffmpeg_path, '-y', '-f', 'concat', '-safe', '0',
-            '-i', list_file, '-c', 'copy', output_file
+            '-i', list_file, '-c', 'copy', output_file,
         ]
 
-        # Security: Use CREATE_NO_WINDOW on Windows, never use shell=True
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         result = subprocess.run(
             ffmpeg_cmd,
             capture_output=True,
             text=True,
             creationflags=creationflags,
-            timeout=3600  # Security: 1 hour timeout to prevent DoS
+            timeout=3600,
         )
 
         if result.returncode != 0:
-            # Try with re-encoding
             if ext == 'mp3':
-                ffmpeg_cmd = [ffmpeg_path, '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
-                             '-acodec', 'libmp3lame', '-b:a', '192k', output_file]
+                ffmpeg_cmd = [
+                    ffmpeg_path, '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
+                    '-acodec', 'libmp3lame', '-b:a', '192k', output_file,
+                ]
             else:
-                ffmpeg_cmd = [ffmpeg_path, '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
-                             '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast', output_file]
+                ffmpeg_cmd = [
+                    ffmpeg_path, '-y', '-f', 'concat', '-safe', '0', '-i', list_file,
+                    '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast', output_file,
+                ]
 
             result = subprocess.run(
                 ffmpeg_cmd,
                 capture_output=True,
                 text=True,
                 creationflags=creationflags,
-                timeout=7200  # Security: 2 hour timeout for re-encoding
+                timeout=7200,
             )
-
             if result.returncode != 0:
-                raise Exception(f"FFmpeg error: {result.stderr}")
+                raise RuntimeError(f"FFmpeg error: {result.stderr}")
 
         return True
     except subprocess.TimeoutExpired:
-        print("Merge operation timed out")
         return False
-    except Exception as e:
-        print(f"Merge error: {e}")
+    except Exception:
         return False
+

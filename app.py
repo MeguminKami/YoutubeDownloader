@@ -8,9 +8,14 @@ from typing import List
 import re
 from core.models import DownloadItem
 from core.deps import check_yt_dlp
-from core.downloader import Downloader
+from core.downloader import (
+    Downloader,
+    DirectDownloadError,
+    MergeFailureError,
+    MissingFFmpegError,
+    NoCompatibleFormatError,
+)
 from ui.theme import ThemeManager
-from ui.widgets import create_tooltip
 from ui.dialogs import InstallerDialog, OptionsDialog, ProgressDialog
 from utils.format import format_bytes, format_speed, format_eta, SpeedSmoother
 
@@ -345,6 +350,8 @@ class YouTubeDownloaderApp(ctk.CTk):
                 # Use quality_label for display, fallback to quality/height
                 quality_display = item.quality_label or (f"{item.height}p" if item.height else "Auto")
                 details_text = f"{quality_display} - MP4"
+                if getattr(item, 'requires_merge', False):
+                    details_text += " (auto audio merge)"
             else:
                 details_text = f"MP3 {item.audio_format} kbps"
 
@@ -396,7 +403,6 @@ class YouTubeDownloaderApp(ctk.CTk):
 
     def download_all(self, folder):
         """Download all queued items with progress tracking"""
-        import time
 
         # Show progress dialog first (on main thread)
         self.progress_dialog = None
@@ -451,7 +457,7 @@ class YouTubeDownloaderApp(ctk.CTk):
                 self.after(0, lambda title=item.title:
                           self.progress_dialog.progress_label.configure(text=title[:50] + "..." if len(title) > 50 else title))
                 self.after(0, lambda:
-                          self.progress_dialog.status_message.configure(text="Downloading..."))
+                          self.progress_dialog.status_message.configure(text="Downloading selected quality..."))
 
                 def progress_hook(d):
                     self._handle_progress(d, item)
@@ -466,18 +472,64 @@ class YouTubeDownloaderApp(ctk.CTk):
                     self.completed_bytes += self.current_item_bytes
 
             except Exception as e:
-                self.after(0, lambda err=str(e), i=idx:
-                          messagebox.showerror("Download Error", f"Error downloading item {i+1}:\n{err}"))
+                if isinstance(e, MissingFFmpegError):
+                    error_title = "FFmpeg Required"
+                elif isinstance(e, NoCompatibleFormatError):
+                    error_title = "No Compatible Format"
+                elif isinstance(e, MergeFailureError):
+                    error_title = "Merge Failed"
+                elif isinstance(e, DirectDownloadError):
+                    error_title = "Direct Download Failed"
+                else:
+                    error_title = "Download Error"
+
+                self.after(0, lambda err=str(e), i=idx, title=error_title:
+                          messagebox.showerror(title, f"Error downloading item {i+1}:\n{err}"))
 
         self.after(0, self._download_complete)
 
     def _handle_progress(self, d, item):
         """Handle progress updates from yt-dlp"""
+        if d.get('status') == 'stage':
+            stage = d.get('stage', '')
+            stage_map = {
+                'fetching formats': 'Fetching formats...',
+                'formats loaded': 'Formats loaded',
+                'downloading selected quality': 'Downloading selected quality...',
+                'downloading video stream': 'Downloading video stream...',
+                'downloading audio stream': 'Downloading audio stream...',
+                'merging streams': 'Merging streams...',
+                'completed': 'Completed',
+            }
+            status_text = stage_map.get(stage, stage)
+            self.after(0, lambda t=status_text: self.progress_dialog.status_message.configure(text=t))
+            return
+
         if d['status'] == 'downloading':
             try:
-                downloaded = d.get('downloaded_bytes', 0)
-                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-                speed = d.get('speed', 0)
+                if d.get('percent') is not None:
+                    percent = max(0.0, min(100.0, float(d.get('percent', 0))))
+                    self.after(0, lambda p=percent:
+                              self.progress_dialog.percent_label.configure(text=f"{p:.1f}%"))
+                    self.after(0, lambda p=percent / 100:
+                              self.progress_dialog.progress_bar.set(p))
+
+                    speed_text = d.get('speed_text') or "--"
+                    eta_text = d.get('eta_text') or "--"
+                    self.after(0, lambda s=speed_text:
+                              self.progress_dialog.speed_label.configure(text=s))
+                    self.after(0, lambda e=eta_text:
+                              self.progress_dialog.eta_label.configure(text=e))
+                    return
+
+                downloaded = d.get('downloaded_bytes') or 0
+                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                speed = d.get('speed') or 0
+
+                # yt-dlp may report None for unknown values during startup.
+                downloaded = float(downloaded) if downloaded else 0
+                total = float(total) if total else 0
+                speed = float(speed) if speed else 0
 
                 # Update current item bytes (monotonic)
                 if downloaded > self.current_item_bytes:

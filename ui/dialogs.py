@@ -194,6 +194,7 @@ class OptionsDialog(ctk.CTkToplevel):
         self.info = info
         self.callback = callback
         self.available_formats = None
+        self.format_lookup = {}
         self.video_format_widgets = []
 
         self.title("Download Options")
@@ -279,21 +280,28 @@ class OptionsDialog(ctk.CTkToplevel):
             # Fall through to add fallback options
 
         if video_formats:
-            # Set default to first (highest quality) format
-            first_format = video_formats[0]
-            self.quality_var.set(first_format['format_id'])
-            self.selected_quality_display = first_format['resolution']
+            self.format_lookup = {fmt['format_id']: fmt for fmt in video_formats}
 
+            first_selectable = None
             for fmt in video_formats:
                 format_id = fmt['format_id']
                 resolution = fmt['resolution']
+                requires_merge = fmt.get('requires_merge', False)
+                has_compatible_audio = bool(fmt.get('audio_format_id')) if requires_merge else True
+
+                if not has_compatible_audio:
+                    resolution = f"{resolution} (no compatible audio stream)"
+
+                if first_selectable is None and has_compatible_audio:
+                    first_selectable = fmt
 
                 rb = ctk.CTkRadioButton(
                     self.video_quality_frame,
                     text=resolution,  # Already formatted as "1080p 60fps (MP4) ~500MB"
                     variable=self.quality_var,
                     value=format_id,  # CRITICAL: Use format_id as value!
-                    font=ctk.CTkFont(size=12)
+                    font=ctk.CTkFont(size=12),
+                    state="normal" if has_compatible_audio else "disabled"
                 )
                 rb.pack(anchor="w", pady=2)
                 self.video_format_widgets.append(rb)
@@ -301,6 +309,12 @@ class OptionsDialog(ctk.CTkToplevel):
                 # Store resolution for display
                 rb._resolution = resolution
                 rb._format_id = format_id
+
+            if first_selectable:
+                self.quality_var.set(first_selectable['format_id'])
+                self.selected_quality_display = first_selectable['resolution']
+            else:
+                self.quality_var.set("")
         else:
             # Fallback if no formats found
             label = ctk.CTkLabel(
@@ -513,6 +527,10 @@ class OptionsDialog(ctk.CTkToplevel):
 
     def _on_add(self):
         """Add to queue"""
+        if self.download_type.get() == "video" and not self.quality_var.get() and self.available_formats:
+            messagebox.showerror("No Format", "No compatible quality option is available for this video.")
+            return
+
         merge = self.merge_playlist_var.get() == "merge" if self.merge_playlist_var else False
         custom_name = self.custom_name_entry.get().strip() if self.custom_name_entry else None
         is_playlist = 'entries' in self.info
@@ -522,16 +540,23 @@ class OptionsDialog(ctk.CTkToplevel):
 
         # Determine if we have a format_id or a height value
         format_id = None
+        selected_audio_format_id = None
+        requires_merge = False
         height = None
         quality_label = None
 
         if self.available_formats and self.download_type.get() == "video":
-            video_formats = self.available_formats.get('video_formats', [])
-            for fmt in video_formats:
-                if fmt['format_id'] == selected_value:
-                    format_id = selected_value
-                    quality_label = fmt['resolution']
-                    break
+            selected_format = self.format_lookup.get(selected_value)
+            if selected_format:
+                format_id = selected_value
+                quality_label = selected_format['resolution']
+                height = selected_format.get('height')
+                requires_merge = bool(selected_format.get('requires_merge'))
+                selected_audio_format_id = selected_format.get('audio_format_id')
+
+                if requires_merge and not selected_audio_format_id:
+                    messagebox.showerror("No Audio Stream", "The selected quality requires an audio stream, but no compatible audio format was found.")
+                    return
 
         # If no format_id found, selected_value is a height (fallback/playlist mode)
         if not format_id and self.download_type.get() == "video":
@@ -558,7 +583,10 @@ class OptionsDialog(ctk.CTkToplevel):
                         custom_name=None,
                         title=entry.get('title', 'Unknown'),
                         quality_label=quality_label,
-                        height=height or (int(selected_value) if selected_value.isdigit() else 1080)
+                        height=height or (int(selected_value) if selected_value.isdigit() else 1080),
+                        requires_merge=requires_merge,
+                        selected_audio_format_id=selected_audio_format_id,
+                        selected_video_format_id=format_id
                     )
                     items.append(item)
             # Callback with list of items
@@ -574,7 +602,10 @@ class OptionsDialog(ctk.CTkToplevel):
                 merge_playlist=merge,
                 custom_name=custom_name if custom_name else None,
                 quality_label=quality_label,
-                height=height
+                height=height,
+                requires_merge=requires_merge,
+                selected_audio_format_id=selected_audio_format_id,
+                selected_video_format_id=format_id
             )
 
             if is_playlist and merge:

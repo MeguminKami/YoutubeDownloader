@@ -5,7 +5,7 @@ Security Note: Admin elevation removed by default as it's not required
 for normal download operations. Users can run as admin if needed for
 specific download locations.
 """
-import sys
+
 
 def main():
     # Note: Admin elevation removed for security

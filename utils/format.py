@@ -3,8 +3,20 @@ Formatting utilities for bytes, speed, ETA, etc.
 """
 from typing import Optional
 
-def format_bytes(bytes_val: float) -> str:
+def _to_non_negative_number(value: Optional[float]) -> float:
+    """Convert possibly-missing numeric values to a safe non-negative float."""
+    if value is None:
+        return 0.0
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return numeric if numeric > 0 else 0.0
+
+
+def format_bytes(bytes_val: Optional[float]) -> str:
     """Format bytes to human-readable format"""
+    bytes_val = _to_non_negative_number(bytes_val)
     if bytes_val >= 1024 * 1024 * 1024:
         return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
     elif bytes_val >= 1024 * 1024:
@@ -14,8 +26,11 @@ def format_bytes(bytes_val: float) -> str:
     else:
         return f"{bytes_val:.0f} B"
 
-def format_speed(speed_bytes: float) -> str:
+def format_speed(speed_bytes: Optional[float]) -> str:
     """Format speed in bytes/sec to human-readable format"""
+    speed_bytes = _to_non_negative_number(speed_bytes)
+    if speed_bytes <= 0:
+        return "--"
     if speed_bytes >= 1024 * 1024:
         return f"{speed_bytes / (1024 * 1024):.1f} MB/s"
     elif speed_bytes >= 1024:
@@ -25,7 +40,8 @@ def format_speed(speed_bytes: float) -> str:
 
 def format_eta(eta_seconds: Optional[float]) -> str:
     """Format ETA in seconds to human-readable format"""
-    if not eta_seconds or eta_seconds <= 0:
+    eta_seconds = _to_non_negative_number(eta_seconds)
+    if eta_seconds <= 0:
         return "--"
 
     eta_seconds = int(eta_seconds)

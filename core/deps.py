@@ -22,7 +22,7 @@ def install_yt_dlp(progress_callback: Optional[Callable[[str], None]] = None) ->
         if progress_callback:
             progress_callback("Starting installation...")
 
-        cmd = [sys.executable, "-m", "pip", "install", "yt-dlp"]
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"]
 
         if progress_callback:
             progress_callback(f"Running: {' '.join(cmd)}")
