@@ -78,9 +78,19 @@ jobs:
         shell: pwsh
         run: |
           $sep = if ($env:RUNNER_OS -eq 'Windows') { ';' } else { ':' }
+          $hiddenImports = @()
+          if ($env:RUNNER_OS -eq 'Linux') {
+            # Pillow+Tk in frozen Linux builds needs this helper explicitly bundled.
+            $hiddenImports += '--hidden-import'
+            $hiddenImports += 'PIL._tkinter_finder'
+            $hiddenImports += '--hidden-import'
+            $hiddenImports += 'PIL.ImageTk'
+          }
+
           python -m PyInstaller --noconfirm --clean --windowed `
             --name "$env:APP_NAME" `
             --add-data "ui/logo.png${sep}ui" `
+            @hiddenImports `
             main.py
 
       - name: Verify executable artifact
