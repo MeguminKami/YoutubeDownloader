@@ -18,15 +18,21 @@ jobs:
         include:
           - os: windows-latest
             platform: windows
-            executable_name: YouTubeDownloaderPro.exe
+            verify_path: dist/YouTubeDownloaderPro/YouTubeDownloaderPro.exe
+            package_path: dist/YouTubeDownloaderPro
+            package_type: dir
             archive_ext: zip
           - os: macos-latest
             platform: macos
-            executable_name: YouTubeDownloaderPro
+            verify_path: dist/YouTubeDownloaderPro.app
+            package_path: dist/YouTubeDownloaderPro.app
+            package_type: dir
             archive_ext: tar.gz
           - os: ubuntu-latest
             platform: linux
-            executable_name: YouTubeDownloaderPro
+            verify_path: dist/YouTubeDownloaderPro/YouTubeDownloaderPro
+            package_path: dist/YouTubeDownloaderPro
+            package_type: dir
             archive_ext: tar.gz
 
     env:
@@ -36,6 +42,14 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Validate release tag format
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must match vX.Y. Got: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,7 +62,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk
+          sudo apt-get install -y python3-tk xvfb
 
       - name: Install dependencies
         run: |
@@ -72,18 +86,102 @@ jobs:
       - name: Verify executable artifact
         shell: pwsh
         run: |
-          $binaryPath = Join-Path "dist" "${{ matrix.executable_name }}"
-          if (!(Test-Path $binaryPath)) {
-            throw "Expected executable not found: $binaryPath"
+          $artifactPath = "${{ matrix.verify_path }}"
+          if (!(Test-Path $artifactPath)) {
+            throw "Expected build output not found: $artifactPath"
           }
-          $item = Get-Item $binaryPath
-          if ($item.Length -le 0) {
-            throw "Executable is empty: $binaryPath"
+
+          if ($env:RUNNER_OS -eq 'Windows') {
+            if ($artifactPath -notlike '*.exe') {
+              throw "Windows artifact is not an EXE: $artifactPath"
+            }
+            $item = Get-Item $artifactPath
+            if ($item.Length -le 0) {
+              throw "Executable is empty: $artifactPath"
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($artifactPath)
+            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "Windows executable does not have MZ header: $artifactPath"
+            }
           }
-          if ($env:RUNNER_OS -ne 'Windows') {
-            & chmod +x $binaryPath
+
+          if ($env:RUNNER_OS -eq 'macOS') {
+            if ($artifactPath -notlike '*.app') {
+              throw "macOS artifact is not an .app bundle: $artifactPath"
+            }
+            $bundleExecutable = Join-Path $artifactPath "Contents/MacOS/$env:APP_NAME"
+            $plist = Join-Path $artifactPath "Contents/Info.plist"
+            if (!(Test-Path $bundleExecutable)) {
+              throw "Missing macOS app executable: $bundleExecutable"
+            }
+            if (!(Test-Path $plist)) {
+              throw "Missing macOS Info.plist: $plist"
+            }
+            & chmod +x $bundleExecutable
           }
-          Write-Host "Verified executable: $binaryPath ($($item.Length) bytes)"
+
+          if ($env:RUNNER_OS -eq 'Linux') {
+            $item = Get-Item $artifactPath
+            if ($item.Length -le 0) {
+              throw "Linux binary is empty: $artifactPath"
+            }
+            & chmod +x $artifactPath
+            $bytes = [System.IO.File]::ReadAllBytes($artifactPath)
+            if ($bytes.Length -lt 4 -or $bytes[0] -ne 0x7F -or $bytes[1] -ne 0x45 -or $bytes[2] -ne 0x4C -or $bytes[3] -ne 0x46) {
+              throw "Linux artifact is not an ELF binary: $artifactPath"
+            }
+          }
+
+          $invalidInstallerExtensions = @('.msi', '.pkg', '.deb', '.rpm')
+          foreach ($ext in $invalidInstallerExtensions) {
+            if ($artifactPath.ToLower().EndsWith($ext)) {
+              throw "Installer output is not allowed: $artifactPath"
+            }
+          }
+
+          Write-Host "Verified release output: $artifactPath"
+
+      - name: Smoke test executable launch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "${{ matrix.verify_path }}"
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited -and $process.ExitCode -ne 0) {
+            throw "Windows app exited immediately with code $($process.ExitCode)"
+          }
+          if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force
+          }
+
+      - name: Smoke test executable launch (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          chmod +x "${{ matrix.verify_path }}"
+          xvfb-run -a "${{ matrix.verify_path }}" &
+          PID=$!
+          sleep 5
+          if ! kill -0 "$PID" 2>/dev/null; then
+            wait "$PID"
+            RC=$?
+            if [ "$RC" -ne 0 ]; then
+              echo "Linux app exited early with code $RC"
+              exit 1
+            fi
+          fi
+          kill "$PID" || true
+
+      - name: Verify macOS bundle metadata
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          APP_PATH="${{ matrix.verify_path }}"
+          test -d "$APP_PATH"
+          test -f "$APP_PATH/Contents/Info.plist"
+          test -f "$APP_PATH/Contents/MacOS/${APP_NAME}"
+          file "$APP_PATH/Contents/MacOS/${APP_NAME}"
 
       - name: Package executable artifact
         shell: pwsh
@@ -96,7 +194,11 @@ jobs:
           New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
           New-Item -ItemType Directory -Path $assetRoot -Force | Out-Null
 
-          Copy-Item (Join-Path "dist" "${{ matrix.executable_name }}") $stagingDir
+          if ("${{ matrix.package_type }}" -eq "dir") {
+            Copy-Item "${{ matrix.package_path }}" $stagingDir -Recurse
+          } else {
+            Copy-Item "${{ matrix.package_path }}" $stagingDir
+          }
 
           if ($env:RUNNER_OS -eq 'Windows') {
             $archivePath = Join-Path $assetRoot "$artifactBase.zip"
@@ -126,6 +228,27 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Verify release assets are present and correctly named
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(release-assets/*)
+          if [ ${#files[@]} -lt 3 ]; then
+            echo "Expected at least 3 release files (windows/macos/linux), got ${#files[@]}"
+            ls -la release-assets
+            exit 1
+          fi
+
+          for f in "${files[@]}"; do
+            base="$(basename "$f")"
+            [[ "$base" == *"-${GITHUB_REF_NAME}-"* ]] || { echo "Version missing from asset name: $base"; exit 1; }
+            [[ "$base" == *"-windows-"* || "$base" == *"-macos-"* || "$base" == *"-linux-"* ]] || { echo "Platform missing from asset name: $base"; exit 1; }
+            [[ "$base" != *.msi && "$base" != *.pkg && "$base" != *.deb && "$base" != *.rpm ]] || { echo "Installer output is not allowed: $base"; exit 1; }
+            [ -s "$f" ] || { echo "Asset is empty: $base"; exit 1; }
+          done
+
+          ls -la release-assets
 
       - name: Create or update release with executable assets
         uses: softprops/action-gh-release@v2
