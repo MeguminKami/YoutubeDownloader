@@ -45,3 +45,4 @@ class DownloadItem:
     requires_merge: bool = False
     selected_audio_format_id: Optional[str] = None
     selected_video_format_id: Optional[str] = None
+    playlist_items: Optional[str] = None

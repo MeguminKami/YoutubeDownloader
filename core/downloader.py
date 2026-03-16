@@ -60,6 +60,11 @@ class MergeFailureError(DownloadPipelineError):
         super().__init__(reason, "merge_failed")
 
 
+class DownloadCancelledError(DownloadPipelineError):
+    def __init__(self, reason: str = 'Download cancelled by user'):
+        super().__init__(reason, "download_cancelled")
+
+
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent traversal/injection attacks."""
     if not filename:
@@ -88,6 +93,37 @@ class Downloader:
 
     def __init__(self, progress_callback: Optional[Callable] = None):
         self.progress_callback = progress_callback
+
+    def _snapshot_files(self, folder: str) -> set:
+        paths = set()
+        if not os.path.isdir(folder):
+            return paths
+        for root, _, files in os.walk(folder):
+            for name in files:
+                paths.add(os.path.abspath(os.path.join(root, name)))
+        return paths
+
+    def _safe_delete_file(self, file_path: str):
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+
+    def _cleanup_cancelled_download(self, folder: str, before_files: set, temp_folder: Optional[str] = None):
+        current_files = self._snapshot_files(folder)
+        for created_file in current_files - before_files:
+            self._safe_delete_file(created_file)
+
+        for pattern in ('*.part', '*.ytdl', '*.temp', '*.tmp'):
+            for file_path in glob.glob(os.path.join(folder, '**', pattern), recursive=True):
+                self._safe_delete_file(file_path)
+
+        if temp_folder and os.path.exists(temp_folder):
+            try:
+                shutil.rmtree(temp_folder)
+            except Exception:
+                pass
 
     def _base_ydl_opts(self) -> Dict[str, Any]:
         """Shared yt-dlp defaults for metadata extraction paths."""
@@ -463,6 +499,18 @@ class Downloader:
         selected_video = (item.quality or '').strip()
         selected_audio = getattr(item, 'selected_audio_format_id', None)
         requires_merge = bool(getattr(item, 'requires_merge', False))
+        selected_height = getattr(item, 'height', None)
+
+        def _fallback_selector_for_height(height_value: Optional[int]) -> str:
+            if height_value:
+                height = int(height_value)
+                return (
+                    f"best[height={height}][ext=mp4]/best[height={height}]"
+                    f"/best[height>={height}][ext=mp4]/best[height>={height}]"
+                    f"/best[height<={height}][ext=mp4]/best[height<={height}]"
+                    f"/best[ext=mp4]/best"
+                )
+            return 'best[ext=mp4]/best'
 
         # Rule A/B for explicit format selection from listed formats.
         if selected_video:
@@ -471,14 +519,14 @@ class Downloader:
                     raise NoCompatibleFormatError('No compatible audio-only stream found for this quality')
                 return DownloadPlan(
                     mode='merge',
-                    selector=f"{selected_video}+{selected_audio}",
+                    selector=f"{selected_video}+{selected_audio}/{_fallback_selector_for_height(selected_height)}",
                     needs_merge=True,
                     video_format_id=selected_video,
                     audio_format_id=selected_audio,
                 )
             return DownloadPlan(
                 mode='direct',
-                selector=selected_video,
+                selector=f"{selected_video}/{_fallback_selector_for_height(selected_height)}",
                 needs_merge=False,
                 video_format_id=selected_video,
             )
@@ -488,19 +536,29 @@ class Downloader:
             height = int(item.height)
             return DownloadPlan(
                 mode='auto',
-                selector=f"bestvideo[height<={height}]+bestaudio/best[height<={height}]",
-                needs_merge=True,
+                selector=(
+                    f"best[height<={height}][ext=mp4]/best[height<={height}]"
+                    f"/best[height>={height}][ext=mp4]/best[height>={height}]"
+                    f"/best[ext=mp4]/best"
+                ),
+                needs_merge=False,
             )
 
         return DownloadPlan(mode='auto', selector='bestvideo+bestaudio/best', needs_merge=True)
 
-    def download_item(self, item, folder: str, progress_hook: Callable):
+    def download_item(self, item, folder: str, progress_hook: Callable, should_cancel: Optional[Callable[[], bool]] = None):
         """Download a single item using explicit yt-dlp command execution."""
         folder = os.path.abspath(folder)
         if not os.path.isdir(folder):
             raise ValueError(f"Invalid download folder: {folder}")
 
+        if should_cancel and should_cancel():
+            raise DownloadCancelledError()
+
         plan = self._build_download_plan(item)
+
+        if item.is_playlist and item.merge_playlist and not self.has_ffmpeg():
+            raise MissingFFmpegError('FFmpeg was not found. Install FFmpeg to merge playlist files.')
 
         if plan.needs_merge and not self.has_ffmpeg():
             raise MissingFFmpegError('FFmpeg was not found. Install FFmpeg to download merge-required qualities.')
@@ -511,6 +569,7 @@ class Downloader:
 
         temp_folder = None
         outtmpl = os.path.join(folder, '%(title).200s.%(ext)s')
+        before_files = self._snapshot_files(folder)
 
         if item.is_playlist and item.merge_playlist:
             temp_folder = tempfile.mkdtemp(prefix='ytdl_playlist_', dir=folder)
@@ -530,6 +589,14 @@ class Downloader:
         elif plan.needs_merge:
             cmd.extend(['--merge-output-format', 'mp4'])
 
+        if item.item_type == 'video' and item.is_playlist and item.merge_playlist:
+            # Keep playlist segments in MP4 so concat merge can process them consistently.
+            cmd.extend(['--remux-video', 'mp4'])
+
+        playlist_items = (getattr(item, 'playlist_items', None) or '').strip()
+        if item.is_playlist and playlist_items:
+            cmd.extend(['--playlist-items', playlist_items])
+
         cmd.append(item.url)
 
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
@@ -546,7 +613,22 @@ class Downloader:
         emitted_audio_stage = False
         emitted_merge_stage = False
 
+        def _cancel_process_and_raise():
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            self._cleanup_cancelled_download(folder, before_files, temp_folder)
+            raise DownloadCancelledError()
+
         for raw_line in process.stdout or []:
+            if should_cancel and should_cancel():
+                _cancel_process_and_raise()
+
             line = raw_line.strip()
             if not line:
                 continue
@@ -579,6 +661,11 @@ class Downloader:
                 progress_hook(progress_payload)
 
         process.wait()
+
+        if should_cancel and should_cancel():
+            self._cleanup_cancelled_download(folder, before_files, temp_folder)
+            raise DownloadCancelledError()
+
         output_text = '\n'.join(captured_lines)
 
         if process.returncode != 0:

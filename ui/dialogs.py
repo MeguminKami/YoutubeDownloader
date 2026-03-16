@@ -4,7 +4,10 @@ Dialog windows: installer, options, progress
 import customtkinter as ctk
 from tkinter import messagebox
 import threading
-from typing import Callable, Optional
+import os
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
+from PIL import Image
 from core.models import DownloadItem
 from utils.format import format_bytes, format_speed, format_eta
 
@@ -525,6 +528,28 @@ class OptionsDialog(ctk.CTkToplevel):
             self.video_quality_frame.master.pack_forget()
             self.audio_quality_frame.master.pack(fill="x", pady=(0, 15))
 
+    def _resolve_playlist_entry_url(self, entry: dict) -> Optional[str]:
+        """Resolve a downloadable URL from playlist entry metadata."""
+        if not entry:
+            return None
+
+        # Prefer canonical page URL when available.
+        webpage_url = (entry.get('webpage_url') or '').strip()
+        if webpage_url:
+            return webpage_url
+
+        raw_url = (entry.get('url') or '').strip()
+        if raw_url:
+            parsed = urlparse(raw_url)
+            if parsed.scheme in ('http', 'https') and parsed.netloc:
+                return raw_url
+
+        video_id = (entry.get('id') or '').strip()
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+        return None
+
     def _on_add(self):
         """Add to queue"""
         if self.download_type.get() == "video" and not self.quality_var.get() and self.available_formats:
@@ -566,30 +591,38 @@ class OptionsDialog(ctk.CTkToplevel):
             else:
                 quality_label = selected_value
 
-        # If it's a playlist and user wants separate files, add each video individually
-        if is_playlist and not merge:
-            entries = self.info.get('entries', [])
+        selected_playlist_rows: Optional[List[Dict[str, Any]]] = None
+        playlist_items_value = None
+
+        if is_playlist:
+            selected_playlist_rows = self._select_playlist_videos()
+            if selected_playlist_rows is None:
+                return
+            if not selected_playlist_rows:
+                messagebox.showwarning("No Videos Selected", "Select at least one video from the playlist.")
+                return
+            playlist_items_value = ",".join(str(row['playlist_index']) for row in selected_playlist_rows)
+
+        # If it's a playlist and user wants separate files, add each selected video individually.
+        if is_playlist and not merge and selected_playlist_rows is not None:
             items = []
-            for entry in entries:
-                if entry:
-                    video_url = entry.get('url') or entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                    item = DownloadItem(
-                        url=video_url,
-                        item_type=self.download_type.get(),
-                        quality=None,  # Playlists use height-based selection
-                        audio_format=self.audio_quality_var.get(),
-                        is_playlist=False,
-                        merge_playlist=False,
-                        custom_name=None,
-                        title=entry.get('title', 'Unknown'),
-                        quality_label=quality_label,
-                        height=height or (int(selected_value) if selected_value.isdigit() else 1080),
-                        requires_merge=requires_merge,
-                        selected_audio_format_id=selected_audio_format_id,
-                        selected_video_format_id=format_id
-                    )
-                    items.append(item)
-            # Callback with list of items
+            for row in selected_playlist_rows:
+                item = DownloadItem(
+                    url=row['url'],
+                    item_type=self.download_type.get(),
+                    quality=None,  # Playlist separate mode uses height-based selection
+                    audio_format=self.audio_quality_var.get(),
+                    is_playlist=False,
+                    merge_playlist=False,
+                    custom_name=None,
+                    title=row['title'],
+                    quality_label=quality_label,
+                    height=height or (int(selected_value) if selected_value.isdigit() else 1080),
+                    requires_merge=requires_merge,
+                    selected_audio_format_id=selected_audio_format_id,
+                    selected_video_format_id=format_id
+                )
+                items.append(item)
             self.callback(items)
         else:
             # Single video or merged playlist
@@ -605,7 +638,8 @@ class OptionsDialog(ctk.CTkToplevel):
                 height=height,
                 requires_merge=requires_merge,
                 selected_audio_format_id=selected_audio_format_id,
-                selected_video_format_id=format_id
+                selected_video_format_id=format_id,
+                playlist_items=playlist_items_value
             )
 
             if is_playlist and merge:
@@ -617,19 +651,143 @@ class OptionsDialog(ctk.CTkToplevel):
 
         self.destroy()
 
+    def _select_playlist_videos(self) -> Optional[List[Dict[str, Any]]]:
+        """Open selection popup and return selected playlist rows or None on cancel."""
+        entries = self.info.get('entries', [])
+        rows: List[Dict[str, Any]] = []
+
+        for idx, entry in enumerate(entries, start=1):
+            if not entry:
+                continue
+            video_url = self._resolve_playlist_entry_url(entry)
+            if not video_url:
+                continue
+
+            title = (entry.get('title') or '').strip() or f"Video {idx}"
+            playlist_index = entry.get('playlist_index') or idx
+            rows.append({
+                'playlist_index': int(playlist_index),
+                'title': title,
+                'url': video_url,
+            })
+
+        if not rows:
+            messagebox.showerror("Playlist Error", "No downloadable videos were found in this playlist.")
+            return []
+
+        dialog = PlaylistSelectionDialog(self, self.theme_colors, rows)
+        self.wait_window(dialog)
+        if not dialog.confirmed:
+            return None
+        return dialog.get_selected_rows()
+
     def _on_cancel(self):
         """Cancel"""
         self.callback([])
         self.destroy()
 
 
-class ProgressDialog(ctk.CTkToplevel):
-    """Dialog showing download progress"""
+class PlaylistSelectionDialog(ctk.CTkToplevel):
+    """Modal dialog to choose which playlist videos should be queued."""
 
-    def __init__(self, parent, theme_colors):
+    def __init__(self, parent, theme_colors, rows: List[Dict[str, Any]]):
         super().__init__(parent)
 
         self.theme_colors = theme_colors
+        self.rows = rows
+        self.confirmed = False
+        self._vars: List[ctk.BooleanVar] = []
+
+        self.title("Select Playlist Videos")
+        self.geometry("700x560")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._center()
+        self._create_ui()
+
+    def _center(self):
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - 350
+        y = (self.winfo_screenheight() // 2) - 280
+        self.geometry(f"+{x}+{y}")
+
+    def _create_ui(self):
+        root = ctk.CTkFrame(self, fg_color=self.theme_colors.bg)
+        root.pack(fill="both", expand=True)
+
+        ctk.CTkLabel(
+            root,
+            text="Choose videos to keep",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=self.theme_colors.text_primary,
+        ).pack(anchor="w", padx=20, pady=(20, 4))
+
+        ctk.CTkLabel(
+            root,
+            text=f"{len(self.rows)} videos detected (all selected by default)",
+            font=ctk.CTkFont(size=12),
+            text_color=self.theme_colors.text_tertiary,
+        ).pack(anchor="w", padx=20, pady=(0, 10))
+
+        list_frame = ctk.CTkScrollableFrame(root, fg_color=self.theme_colors.surface)
+        list_frame.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+
+        for row in self.rows:
+            var = ctk.BooleanVar(value=True)
+            self._vars.append(var)
+            ctk.CTkCheckBox(
+                list_frame,
+                text=f"[{row['playlist_index']:>3}] {row['title']}",
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                font=ctk.CTkFont(size=12),
+            ).pack(anchor="w", pady=3, padx=6)
+
+        btns = ctk.CTkFrame(root, fg_color=self.theme_colors.bg)
+        btns.pack(fill="x", padx=20, pady=(0, 20))
+
+        ctk.CTkButton(
+            btns,
+            text="Cancel",
+            width=130,
+            height=38,
+            fg_color=self.theme_colors.hover,
+            command=self._on_cancel,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            btns,
+            text="Confirm",
+            width=130,
+            height=38,
+            fg_color=self.theme_colors.accent_blue,
+            command=self._on_confirm,
+        ).pack(side="right")
+
+    def _on_cancel(self):
+        self.confirmed = False
+        self.destroy()
+
+    def _on_confirm(self):
+        self.confirmed = True
+        self.destroy()
+
+    def get_selected_rows(self) -> List[Dict[str, Any]]:
+        return [row for row, var in zip(self.rows, self._vars) if var.get()]
+
+
+class ProgressDialog(ctk.CTkToplevel):
+    """Dialog showing download progress"""
+
+    def __init__(self, parent, theme_colors, on_cancel: Optional[Callable] = None):
+        super().__init__(parent)
+
+        self.theme_colors = theme_colors
+        self.on_cancel = on_cancel
+        self.logo_image = self._load_logo_image()
 
         self.title("Downloading...")
         self.geometry("550x400")
@@ -660,8 +818,14 @@ class ProgressDialog(ctk.CTkToplevel):
         header_inner = ctk.CTkFrame(header_frame, fg_color="transparent")
         header_inner.pack(fill="x", padx=25, pady=20)
 
-        icon = ctk.CTkLabel(header_inner, text="⬇", font=ctk.CTkFont(size=36))
-        icon.pack(side="left", padx=(0, 15))
+        if self.logo_image:
+            icon = ctk.CTkLabel(header_inner, text="", image=self.logo_image)
+            icon.pack(side="left", padx=(0, 15))
+            for event_name in ("<Button-1>", "<Button-2>", "<Button-3>", "<Double-Button-1>"):
+                icon.bind(event_name, lambda _event: "break")
+        else:
+            icon = ctk.CTkLabel(header_inner, text="⬇", font=ctk.CTkFont(size=36))
+            icon.pack(side="left", padx=(0, 15))
 
         text_frame = ctk.CTkFrame(header_inner, fg_color="transparent")
         text_frame.pack(side="left", fill="x", expand=True)
@@ -682,6 +846,17 @@ class ProgressDialog(ctk.CTkToplevel):
             anchor="w"
         )
         self.queue_status_label.pack(anchor="w")
+
+        self.cancel_button = ctk.CTkButton(
+            header_inner,
+            text="Cancel Download",
+            width=145,
+            height=34,
+            fg_color="#ef4444",
+            hover_color="#dc2626",
+            command=self._handle_cancel
+        )
+        self.cancel_button.pack(side="right")
 
         # Content
         content_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -761,10 +936,29 @@ class ProgressDialog(ctk.CTkToplevel):
         )
         self.status_message.pack(pady=(5, 0))
 
+    def _load_logo_image(self):
+        logo_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'ui', 'logo.png')
+        if not os.path.exists(logo_path):
+            return None
+        try:
+            image = Image.open(logo_path)
+            return ctk.CTkImage(light_image=image, dark_image=image, size=(42, 42))
+        except Exception:
+            return None
+
+    def _handle_cancel(self):
+        if callable(self.on_cancel):
+            self.on_cancel()
+
+    def set_cancel_enabled(self, enabled: bool):
+        self.cancel_button.configure(state="normal" if enabled else "disabled")
+
     def _create_stats(self, parent):
         """Create stats display"""
+        parent.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="telemetry")
+
         speed_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        speed_frame.pack(side="left", expand=True)
+        speed_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         ctk.CTkLabel(
             speed_frame,
@@ -777,12 +971,13 @@ class ProgressDialog(ctk.CTkToplevel):
             speed_frame,
             text="--",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.theme_colors.text_primary
+            text_color=self.theme_colors.text_primary,
+            anchor="w"
         )
         speed_label.pack(anchor="w")
 
         eta_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        eta_frame.pack(side="left", expand=True)
+        eta_frame.grid(row=0, column=1, sticky="nsew", padx=8)
 
         ctk.CTkLabel(
             eta_frame,
@@ -795,12 +990,13 @@ class ProgressDialog(ctk.CTkToplevel):
             eta_frame,
             text="--",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.theme_colors.text_primary
+            text_color=self.theme_colors.text_primary,
+            anchor="w"
         )
         eta_label.pack(anchor="w")
 
         size_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        size_frame.pack(side="left", expand=True)
+        size_frame.grid(row=0, column=2, sticky="nsew", padx=8)
 
         ctk.CTkLabel(
             size_frame,
@@ -813,12 +1009,13 @@ class ProgressDialog(ctk.CTkToplevel):
             size_frame,
             text="0 B",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.theme_colors.text_primary
+            text_color=self.theme_colors.text_primary,
+            anchor="w"
         )
         size_label.pack(anchor="w")
 
         total_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        total_frame.pack(side="left", expand=True)
+        total_frame.grid(row=0, column=3, sticky="nsew", padx=(8, 0))
 
         ctk.CTkLabel(
             total_frame,
@@ -831,7 +1028,8 @@ class ProgressDialog(ctk.CTkToplevel):
             total_frame,
             text="--",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.theme_colors.text_primary
+            text_color=self.theme_colors.text_primary,
+            anchor="w"
         )
         total_size_label.pack(anchor="w")
 

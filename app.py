@@ -4,12 +4,16 @@ Main application class
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import threading
+import os
+import tempfile
 from typing import List
 import re
+from PIL import Image
 from core.models import DownloadItem
 from core.deps import check_yt_dlp
 from core.downloader import (
     Downloader,
+    DownloadCancelledError,
     DirectDownloadError,
     MergeFailureError,
     MissingFFmpegError,
@@ -38,6 +42,15 @@ class YouTubeDownloaderApp(ctk.CTk):
         self.download_queue: List[DownloadItem] = []
         self.current_download_widgets = []
         self.yt_dlp_available = False
+        self._download_active = False
+        self._cancel_requested = False
+        self._session_created_files = set()
+        self._download_folder = None
+        self._logo_image = None
+        self._window_icon = None
+        self._window_icon_ico = None
+
+        self._load_brand_assets()
 
         self._apply_theme()
         self.create_widgets()
@@ -48,6 +61,38 @@ class YouTubeDownloaderApp(ctk.CTk):
         """Apply current theme colors"""
         self.colors = self.theme_manager.get_colors()
         self.configure(fg_color=self.colors.bg)
+
+    def _load_brand_assets(self):
+        """Load official logo assets used by the application UI."""
+        logo_path = os.path.join(os.path.dirname(__file__), 'ui', 'logo.png')
+        if not os.path.exists(logo_path):
+            return
+
+        try:
+            logo_image = Image.open(logo_path)
+            self._logo_image = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(56, 56))
+        except Exception:
+            self._logo_image = None
+
+        try:
+            # tkinter iconphoto expects PhotoImage, so keep a dedicated Tk photo object.
+            import tkinter as tk
+            self._window_icon = tk.PhotoImage(file=logo_path)
+            self.iconphoto(True, self._window_icon)
+        except Exception:
+            self._window_icon = None
+
+        # Windows title bar/taskbar icon is usually driven by ICO files.
+        try:
+            ico_path = os.path.join(os.path.dirname(__file__), 'ui', 'logo.ico')
+            if not os.path.exists(ico_path):
+                ico_path = os.path.join(tempfile.gettempdir(), 'youtube_downloader_logo.ico')
+                with Image.open(logo_path) as icon_source:
+                    icon_source.save(ico_path, format='ICO', sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+            self._window_icon_ico = ico_path
+            self.iconbitmap(self._window_icon_ico)
+        except Exception:
+            self._window_icon_ico = None
 
     def _on_theme_change(self, colors):
         """Handle theme change"""
@@ -71,21 +116,38 @@ class YouTubeDownloaderApp(ctk.CTk):
         title_container = ctk.CTkFrame(header_frame, fg_color="transparent")
         title_container.pack(side="left", fill="x", expand=True)
 
+        title_row = ctk.CTkFrame(title_container, fg_color="transparent")
+        title_row.pack(anchor="center")
+
+        if self._logo_image:
+            logo_label = ctk.CTkLabel(
+                title_row,
+                text="",
+                image=self._logo_image,
+                fg_color="transparent",
+                bg_color="transparent",
+                cursor="arrow"
+            )
+            logo_label.pack(side="left", padx=(0, 12))
+            for event_name in ("<Button-1>", "<Button-2>", "<Button-3>", "<Double-Button-1>"):
+                logo_label.bind(event_name, lambda _event: "break")
+
         title = ctk.CTkLabel(
-            title_container,
-            text="🎬 YouTube Downloader Pro",
+            title_row,
+            text="YouTube Downloader Pro",
             font=ctk.CTkFont(size=32, weight="bold"),
             text_color=self.colors.accent_blue
         )
-        title.pack()
+        title.pack(side="left")
 
         subtitle = ctk.CTkLabel(
             title_container,
             text="Download videos and audio with ease",
             font=ctk.CTkFont(size=14),
-            text_color=self.colors.text_tertiary
+            text_color=self.colors.text_tertiary,
+            anchor="center"
         )
-        subtitle.pack()
+        subtitle.pack(anchor="center")
 
         # Theme toggle switch
         theme_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
@@ -203,7 +265,7 @@ class YouTubeDownloaderApp(ctk.CTk):
         # Download Button
         download_btn = ctk.CTkButton(
             main_container,
-            text="⬇ Download All",
+            text="Download All",
             height=55,
             font=ctk.CTkFont(size=18, weight="bold"),
             corner_radius=15,
@@ -389,6 +451,10 @@ class YouTubeDownloaderApp(ctk.CTk):
 
     def start_download(self):
         """Start downloading all items"""
+        if self._download_active:
+            messagebox.showinfo("Download Running", "A download is already in progress.")
+            return
+
         if len(self.download_queue) == 0:
             messagebox.showinfo("Info", "No items in queue to download")
             return
@@ -401,8 +467,58 @@ class YouTubeDownloaderApp(ctk.CTk):
         thread.daemon = True
         thread.start()
 
+    def _snapshot_files(self, folder: str) -> set:
+        """Capture all current files under target folder for cancellation cleanup."""
+        paths = set()
+        if not folder or not os.path.isdir(folder):
+            return paths
+        for root, _, files in os.walk(folder):
+            for name in files:
+                paths.add(os.path.abspath(os.path.join(root, name)))
+        return paths
+
+    def _delete_session_files(self):
+        """Delete files produced during the current session when user cancels."""
+        for file_path in sorted(self._session_created_files, reverse=True):
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+
+        self._session_created_files.clear()
+
+    def _request_cancel_download(self):
+        """Ask current worker to stop and keep queue untouched for retry."""
+        if not self._download_active:
+            return
+        self._cancel_requested = True
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.after(0, lambda: self.progress_dialog.status_message.configure(text="Cancelling download... cleaning files."))
+            self.after(0, lambda: self.progress_dialog.set_cancel_enabled(False))
+
+    def _is_cancel_requested(self) -> bool:
+        return bool(self._cancel_requested)
+
+    def _total_size_text(self) -> str:
+        """Return a user-friendly total size text for progress labels."""
+        if getattr(self, 'total_estimated_bytes', None):
+            return format_bytes(self.total_estimated_bytes)
+        if getattr(self, '_estimating_size', False):
+            return "Estimating..."
+        return "Unknown"
+
+    def _update_queue_status_label(self, current: int, total: int):
+        """Display clear queue progress like 'Download x/total' plus total size."""
+        text = f"Download {current}/{total}  |  Total size: {self._total_size_text()}"
+        self.after(0, lambda t=text: self.progress_dialog.queue_status_label.configure(text=t))
+
     def download_all(self, folder):
         """Download all queued items with progress tracking"""
+        self._download_active = True
+        self._cancel_requested = False
+        self._session_created_files = set()
+        self._download_folder = folder
 
         # Show progress dialog first (on main thread)
         self.progress_dialog = None
@@ -413,19 +529,26 @@ class YouTubeDownloaderApp(ctk.CTk):
         self._dialog_ready.wait(timeout=5)
 
         if self.progress_dialog is None:
+            self._download_active = False
+            self._cancel_requested = False
             self.after(0, lambda: messagebox.showerror("Error", "Could not create progress dialog"))
             return
 
         downloader = Downloader()
         total_items = len(self.download_queue)
+        self.current_total_items = total_items
+        self._estimating_size = True
 
         # Update status: Estimating size
         self.after(0, lambda: self.progress_dialog.status_message.configure(text="Estimating download size..."))
-        self.after(0, lambda: self.progress_dialog.queue_status_label.configure(text=f"0 of {total_items} files"))
+        self._update_queue_status_label(0, total_items)
+        self.after(0, lambda: self.progress_dialog.total_size_label.configure(text="Estimating..."))
 
         # Estimate total size for all items
         total_estimated_size = 0
         for item in self.download_queue:
+            if self._cancel_requested:
+                break
             try:
                 size = downloader.estimate_size(item.url, item.item_type, item.quality, item.audio_format)
                 if size:
@@ -435,6 +558,7 @@ class YouTubeDownloaderApp(ctk.CTk):
                 pass
 
         self.total_estimated_bytes = total_estimated_size if total_estimated_size > 0 else None
+        self._estimating_size = False
         self.completed_bytes = 0
         self.current_item_bytes = 0
         self.speed_smoother = SpeedSmoother()
@@ -443,26 +567,39 @@ class YouTubeDownloaderApp(ctk.CTk):
         if self.total_estimated_bytes:
             self.after(0, lambda sz=format_bytes(self.total_estimated_bytes):
                       self.progress_dialog.total_size_label.configure(text=sz))
+        else:
+            self.after(0, lambda: self.progress_dialog.total_size_label.configure(text="Unknown"))
+
+        self._update_queue_status_label(0, total_items)
 
         # Download each item
+        cancelled = False
+        had_errors = False
         for idx, item in enumerate(self.download_queue):
+            if self._cancel_requested:
+                cancelled = True
+                break
+
             try:
                 self.current_item_index = idx
                 self.current_item_bytes = 0
+                before_item_files = self._snapshot_files(folder)
 
                 # Update UI for current item
                 file_num = idx + 1
-                self.after(0, lambda i=file_num, t=total_items:
-                          self.progress_dialog.queue_status_label.configure(text=f"File {i} of {t}"))
+                self._update_queue_status_label(file_num, total_items)
                 self.after(0, lambda title=item.title:
                           self.progress_dialog.progress_label.configure(text=title[:50] + "..." if len(title) > 50 else title))
-                self.after(0, lambda:
-                          self.progress_dialog.status_message.configure(text="Downloading selected quality..."))
+                self.after(0, lambda i=file_num, t=total_items:
+                          self.progress_dialog.status_message.configure(text=f"Downloading selected quality... (Download {i}/{t})"))
 
                 def progress_hook(d):
                     self._handle_progress(d, item)
 
-                downloader.download_item(item, folder, progress_hook)
+                downloader.download_item(item, folder, progress_hook, should_cancel=self._is_cancel_requested)
+
+                after_item_files = self._snapshot_files(folder)
+                self._session_created_files.update(after_item_files - before_item_files)
 
                 # Mark item as complete - add its size to completed bytes
                 if item.estimated_size:
@@ -472,6 +609,11 @@ class YouTubeDownloaderApp(ctk.CTk):
                     self.completed_bytes += self.current_item_bytes
 
             except Exception as e:
+                if isinstance(e, DownloadCancelledError):
+                    cancelled = True
+                    break
+
+                had_errors = True
                 if isinstance(e, MissingFFmpegError):
                     error_title = "FFmpeg Required"
                 elif isinstance(e, NoCompatibleFormatError):
@@ -486,7 +628,10 @@ class YouTubeDownloaderApp(ctk.CTk):
                 self.after(0, lambda err=str(e), i=idx, title=error_title:
                           messagebox.showerror(title, f"Error downloading item {i+1}:\n{err}"))
 
-        self.after(0, self._download_complete)
+        if cancelled:
+            self._delete_session_files()
+
+        self.after(0, lambda c=cancelled, e=had_errors: self._download_complete(cancelled=c, had_errors=e))
 
     def _handle_progress(self, d, item):
         """Handle progress updates from yt-dlp"""
@@ -502,7 +647,10 @@ class YouTubeDownloaderApp(ctk.CTk):
                 'completed': 'Completed',
             }
             status_text = stage_map.get(stage, stage)
-            self.after(0, lambda t=status_text: self.progress_dialog.status_message.configure(text=t))
+            current = min(getattr(self, 'current_item_index', 0) + 1, getattr(self, 'current_total_items', 1))
+            total = max(1, getattr(self, 'current_total_items', 1))
+            self.after(0, lambda t=status_text, c=current, total_items=total:
+                      self.progress_dialog.status_message.configure(text=f"{t} (Download {c}/{total_items})"))
             return
 
         if d['status'] == 'downloading':
@@ -580,20 +728,38 @@ class YouTubeDownloaderApp(ctk.CTk):
                 print(f"Progress hook error: {ex}")
 
         elif d['status'] == 'finished':
-            self.after(0, lambda:
-                      self.progress_dialog.status_message.configure(text="Processing file..."))
+            current = min(getattr(self, 'current_item_index', 0) + 1, getattr(self, 'current_total_items', 1))
+            total = max(1, getattr(self, 'current_total_items', 1))
+            self.after(0, lambda c=current, total_items=total:
+                      self.progress_dialog.status_message.configure(text=f"Processing file... (Download {c}/{total_items})"))
 
     def _show_progress_dialog(self):
         """Show progress dialog"""
-        self.progress_dialog = ProgressDialog(self, self.colors)
+        self.progress_dialog = ProgressDialog(self, self.colors, on_cancel=self._request_cancel_download)
         self.progress_dialog.update()  # Force UI update
         if hasattr(self, '_dialog_ready'):
             self._dialog_ready.set()
 
-    def _download_complete(self):
+    def _download_complete(self, cancelled: bool = False, had_errors: bool = False):
         """Handle download completion"""
         if hasattr(self, 'progress_dialog') and self.progress_dialog:
             self.progress_dialog.destroy()
+            self.progress_dialog = None
+
+        self._download_active = False
+        self._cancel_requested = False
+        self._download_folder = None
+
+        if cancelled:
+            messagebox.showinfo("Cancelled", "Download cancelled. Queue kept so you can retry.")
+            self.update_queue_display()
+            return
+
+        if had_errors:
+            messagebox.showwarning("Completed with Errors", "Download finished, but some items failed.")
+            self.download_queue.clear()
+            self.update_queue_display()
+            return
 
         messagebox.showinfo("Complete", "All downloads completed successfully!")
         self.download_queue.clear()
