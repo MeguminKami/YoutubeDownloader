@@ -2,11 +2,28 @@
 
 import os
 import shutil
+import sys
 import sysconfig
 
 
+def _spec_dir() -> str:
+    # PyInstaller may execute spec files without defining __file__.
+    spec_path = globals().get('__file__') or globals().get('SPEC')
+    if spec_path:
+        return os.path.dirname(os.path.abspath(spec_path))
+
+    spec_dir = globals().get('SPECPATH')
+    if spec_dir:
+        return os.path.abspath(spec_dir)
+
+    if sys.argv and sys.argv[-1].lower().endswith('.spec'):
+        return os.path.dirname(os.path.abspath(sys.argv[-1]))
+
+    return os.path.abspath(os.getcwd())
+
+
 def _asset_path(*parts: str) -> str:
-    return os.path.join(os.path.dirname(__file__), *parts)
+    return os.path.join(_spec_dir(), *parts)
 
 
 def _resolve_windows_icon() -> str:
@@ -59,10 +76,10 @@ if os.name == 'nt':
 
 
 a = Analysis(
-    ['main.py'],
+    [_asset_path('main.py')],
     pathex=[],
     binaries=windows_binaries,
-    datas=[('ui/logo.png', 'ui')],
+    datas=[(_asset_path('ui', 'logo.png'), 'ui')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
