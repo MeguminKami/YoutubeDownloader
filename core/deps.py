@@ -14,8 +14,25 @@ def is_frozen_runtime() -> bool:
 
 def _runtime_dir() -> str:
     if is_frozen_runtime():
+        meipass_dir = getattr(sys, "_MEIPASS", None)
+        if meipass_dir:
+            return meipass_dir
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(__file__))
+
+
+def _runtime_search_dirs() -> List[str]:
+    """Return runtime directories to probe for bundled tools in priority order."""
+    if not is_frozen_runtime():
+        return [_runtime_dir()]
+
+    search_dirs: List[str] = []
+    meipass_dir = getattr(sys, "_MEIPASS", None)
+    executable_dir = os.path.dirname(sys.executable)
+    for candidate in (meipass_dir, executable_dir):
+        if candidate and candidate not in search_dirs:
+            search_dirs.append(candidate)
+    return search_dirs
 
 
 def _binary_candidates(tool_name: str) -> List[str]:
@@ -26,11 +43,11 @@ def _binary_candidates(tool_name: str) -> List[str]:
 
 def find_bundled_binary(tool_name: str) -> Optional[str]:
     """Return bundled binary path when present in frozen app directory."""
-    base_dir = _runtime_dir()
-    for candidate in _binary_candidates(tool_name):
-        candidate_path = os.path.join(base_dir, candidate)
-        if os.path.isfile(candidate_path):
-            return candidate_path
+    for base_dir in _runtime_search_dirs():
+        for candidate in _binary_candidates(tool_name):
+            candidate_path = os.path.join(base_dir, candidate)
+            if os.path.isfile(candidate_path):
+                return candidate_path
     return None
 
 
@@ -70,7 +87,10 @@ def install_yt_dlp(progress_callback: Optional[Callable[[str], None]] = None) ->
     """
     try:
         if is_frozen_runtime():
-            return False, "Frozen app cannot install dependencies at runtime. Rebuild the release bundle with bundled tools."
+            return False, (
+                "Packaged builds cannot install dependencies at runtime. "
+                "Rebuild/reinstall a complete release that bundles yt-dlp, ffmpeg, and ffprobe."
+            )
 
         if progress_callback:
             progress_callback("Starting installation...")

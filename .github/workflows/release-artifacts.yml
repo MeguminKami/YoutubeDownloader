@@ -21,9 +21,9 @@ jobs:
         include:
           - os: windows-latest
             platform: windows
-            verify_path: dist/YouTubeDownloaderPro/YouTubeDownloaderPro.exe
-            package_path: dist/YouTubeDownloaderPro
-            package_type: dir
+            verify_path: dist/YouTubeDownloaderPro.exe
+            package_path: dist/YouTubeDownloaderPro.exe
+            package_type: file
             archive_ext: zip
           - os: macos-latest
             platform: macos
@@ -87,25 +87,6 @@ jobs:
         run: |
           python -c "import main; print('import-ok')"
 
-      - name: Build executable with PyInstaller
-        shell: pwsh
-        run: |
-          $sep = if ($env:RUNNER_OS -eq 'Windows') { ';' } else { ':' }
-          $hiddenImports = @()
-          if ($env:RUNNER_OS -eq 'Linux') {
-            # Pillow+Tk in frozen Linux builds needs this helper explicitly bundled.
-            $hiddenImports += '--hidden-import'
-            $hiddenImports += 'PIL._tkinter_finder'
-            $hiddenImports += '--hidden-import'
-            $hiddenImports += 'PIL.ImageTk'
-          }
-
-          python -m PyInstaller --noconfirm --clean --windowed `
-            --name "$env:APP_NAME" `
-            --add-data "ui/logo.png${sep}ui" `
-            @hiddenImports `
-            main.py
-
       - name: Install FFmpeg tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -122,15 +103,10 @@ jobs:
           Write-Host "ffmpeg: $($ffmpeg.Source)"
           Write-Host "ffprobe: $($ffprobe.Source)"
 
-      - name: Bundle runtime tools into Windows dist directory
+      - name: Resolve Windows runtime tool inputs
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $distDir = Join-Path $PWD "dist/$env:APP_NAME"
-          if (!(Test-Path $distDir)) {
-            throw "Dist directory not found: $distDir"
-          }
-
           $ytDlpPath = @(
             (Get-Command yt-dlp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
             (Join-Path (python -c "import sysconfig; print(sysconfig.get_path('scripts'))") 'yt-dlp.exe')
@@ -149,35 +125,86 @@ jobs:
             throw "Could not locate ffprobe executable after dependency install."
           }
 
-          Copy-Item $ytDlpPath (Join-Path $distDir 'yt-dlp.exe') -Force
-          Copy-Item $ffmpegPath (Join-Path $distDir 'ffmpeg.exe') -Force
-          Copy-Item $ffprobePath (Join-Path $distDir 'ffprobe.exe') -Force
+          "YTDLP_EXE=$ytDlpPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_EXE=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFPROBE_EXE=$ffprobePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "Bundled runtime tools into $distDir"
+          Write-Host "Resolved runtime tool inputs for onefile packaging."
 
-      - name: Verify bundled runtime tools (Windows)
+      - name: Ensure Windows executable icon asset
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $distDir = Join-Path $PWD "dist/$env:APP_NAME"
-          $requiredTools = @('yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe')
+          if (!(Test-Path 'ui/logo.png')) {
+            throw "Missing required logo asset: ui/logo.png"
+          }
 
-          foreach ($tool in $requiredTools) {
-            $toolPath = Join-Path $distDir $tool
-            if (!(Test-Path $toolPath)) {
-              throw "Missing required bundled runtime tool: $toolPath"
+          if (!(Test-Path 'ui/logo.ico')) {
+            python -c "from PIL import Image; im = Image.open('ui/logo.png'); im.save('ui/logo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(256,256)])"
+          }
+
+          if (!(Test-Path 'ui/logo.ico')) {
+            throw "Unable to prepare Windows executable icon: ui/logo.ico"
+          }
+
+          $icon = Get-Item 'ui/logo.ico'
+          if ($icon.Length -le 0) {
+            throw "Prepared icon is empty: ui/logo.ico"
+          }
+
+          Write-Host "Windows executable icon asset ready: ui/logo.ico"
+
+      - name: Build executable with PyInstaller (Windows onefile)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean YouTubeDownloaderPro.spec
+
+      - name: Validate onefile packaging inputs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $requiredTools = @($env:YTDLP_EXE, $env:FFMPEG_EXE, $env:FFPROBE_EXE)
+
+          foreach ($toolPath in $requiredTools) {
+            if (-not $toolPath -or !(Test-Path $toolPath)) {
+              throw "Missing required runtime tool input: $toolPath"
             }
             $item = Get-Item $toolPath
             if ($item.Length -le 0) {
-              throw "Bundled runtime tool is empty: $toolPath"
+              throw "Runtime tool input is empty: $toolPath"
             }
             $bytes = [System.IO.File]::ReadAllBytes($toolPath)
             if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "Bundled runtime tool is not a valid Windows executable: $toolPath"
+              throw "Runtime tool input is not a valid Windows executable: $toolPath"
             }
           }
 
-          Write-Host "Verified required bundled tools are present in $distDir"
+          if (!(Test-Path 'dist/YouTubeDownloaderPro.exe')) {
+            throw "Onefile executable was not produced."
+          }
+
+          Write-Host "Validated onefile packaging inputs and output executable."
+
+      - name: Build executable with PyInstaller (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: pwsh
+        run: |
+          $sep = if ($env:RUNNER_OS -eq 'Windows') { ';' } else { ':' }
+          $hiddenImports = @()
+          if ($env:RUNNER_OS -eq 'Linux') {
+            # Pillow+Tk in frozen Linux builds needs this helper explicitly bundled.
+            $hiddenImports += '--hidden-import'
+            $hiddenImports += 'PIL._tkinter_finder'
+            $hiddenImports += '--hidden-import'
+            $hiddenImports += 'PIL.ImageTk'
+          }
+
+          python -m PyInstaller --noconfirm --clean --windowed `
+            --name "$env:APP_NAME" `
+            --add-data "ui/logo.png${sep}ui" `
+            @hiddenImports `
+            main.py
 
       - name: Verify executable artifact
         shell: pwsh

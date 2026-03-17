@@ -18,6 +18,7 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional
 
 
+from core.deps import find_bundled_binary, is_frozen_runtime
 from core.models import DownloadPlan
 
 # Security: Maximum allowed download size (10 GB)
@@ -27,39 +28,42 @@ MAX_DOWNLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 SAFE_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
-def _is_frozen_runtime() -> bool:
-    return bool(getattr(sys, 'frozen', False))
+def resolve_runtime_tool(tool_name: str, allow_python_module_fallback: bool = False) -> Optional[List[str]]:
+    """
+    Resolve runtime tool command in this order:
+    1) bundled in _MEIPASS
+    2) bundled beside sys.executable
+    3) PATH
+    4) python -m yt_dlp (dev mode only)
+    """
+    bundled_binary = find_bundled_binary(tool_name)
+    if bundled_binary:
+        return [bundled_binary]
+
+    path_binary = shutil.which(tool_name)
+    if path_binary:
+        return [path_binary]
+
+    if allow_python_module_fallback and tool_name == 'yt-dlp' and not is_frozen_runtime():
+        return [sys.executable, '-m', 'yt_dlp']
+
+    return None
 
 
-def _bundled_runtime_dir() -> Optional[str]:
-    if not _is_frozen_runtime():
-        return None
-    return os.path.dirname(sys.executable)
-
-
-def _binary_candidates(tool_name: str) -> List[str]:
-    if os.name == 'nt':
-        return [f'{tool_name}.exe', tool_name]
-    return [tool_name]
-
-
-def _resolve_bundled_binary(tool_name: str) -> Optional[str]:
-    runtime_dir = _bundled_runtime_dir()
-    if not runtime_dir:
-        return None
-    for candidate in _binary_candidates(tool_name):
-        candidate_path = os.path.join(runtime_dir, candidate)
-        if os.path.isfile(candidate_path):
-            return candidate_path
+def resolve_binary(tool_name: str) -> Optional[str]:
+    """Resolve helper binary path (bundled-first, then PATH)."""
+    command = resolve_runtime_tool(tool_name)
+    if command and len(command) == 1:
+        return command[0]
     return None
 
 
 def resolve_ffmpeg_binary() -> Optional[str]:
-    return _resolve_bundled_binary('ffmpeg') or shutil.which('ffmpeg')
+    return resolve_binary('ffmpeg')
 
 
 def resolve_ffprobe_binary() -> Optional[str]:
-    return _resolve_bundled_binary('ffprobe') or shutil.which('ffprobe')
+    return resolve_binary('ffprobe')
 
 
 class DownloadPipelineError(RuntimeError):
@@ -172,19 +176,15 @@ class Downloader:
         }
 
     def _yt_dlp_base_command(self) -> List[str]:
-        """Return preferred yt-dlp command form (binary or module fallback)."""
-        bundled = _resolve_bundled_binary('yt-dlp')
-        if bundled:
-            return [bundled]
+        """Return preferred yt-dlp command form using unified runtime resolver."""
+        command = resolve_runtime_tool('yt-dlp', allow_python_module_fallback=True)
+        if command:
+            return command
 
-        yt_dlp_bin = shutil.which('yt-dlp')
-        if yt_dlp_bin:
-            return [yt_dlp_bin]
-
-        if _is_frozen_runtime():
+        if is_frozen_runtime():
             raise RuntimeError('Bundled yt-dlp binary is missing from this packaged build.')
 
-        return [sys.executable, '-m', 'yt_dlp']
+        raise RuntimeError('yt-dlp is not available on PATH and python module fallback is unavailable.')
 
     def _yt_dlp_ffmpeg_args(self) -> List[str]:
         ffmpeg_bin = resolve_ffmpeg_binary()

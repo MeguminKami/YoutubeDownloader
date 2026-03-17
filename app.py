@@ -291,6 +291,21 @@ class YouTubeDownloaderApp(ctk.CTk):
                 self.quit()
                 return
 
+            if not check_yt_dlp():
+                messagebox.showerror(
+                    "Packaging Error",
+                    (
+                        "This release bundle is incomplete or corrupted.\n"
+                        "The bundled yt-dlp tool could not be resolved at runtime.\n\n"
+                        "Please download a fresh release build."
+                    ),
+                )
+                self.quit()
+                return
+
+            self.yt_dlp_available = True
+            return
+
         if check_yt_dlp():
             self.yt_dlp_available = True
         else:
