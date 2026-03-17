@@ -10,7 +10,7 @@ from typing import List
 import re
 from PIL import Image
 from core.models import DownloadItem
-from core.deps import check_yt_dlp
+from core.deps import check_yt_dlp, get_missing_bundled_tools, is_frozen_runtime
 from core.downloader import (
     Downloader,
     DownloadCancelledError,
@@ -276,6 +276,21 @@ class YouTubeDownloaderApp(ctk.CTk):
 
     def _check_dependencies(self):
         """Check if yt-dlp is installed"""
+        if is_frozen_runtime():
+            missing_tools = get_missing_bundled_tools()
+            if missing_tools:
+                missing_text = ', '.join(missing_tools)
+                messagebox.showerror(
+                    "Packaging Error",
+                    (
+                        "This release bundle is missing required runtime tools:\n"
+                        f"{missing_text}\n\n"
+                        "Please download a complete release package or contact support."
+                    ),
+                )
+                self.quit()
+                return
+
         if check_yt_dlp():
             self.yt_dlp_available = True
         else:
@@ -283,6 +298,14 @@ class YouTubeDownloaderApp(ctk.CTk):
 
     def _show_installer(self):
         """Show installer dialog"""
+        if is_frozen_runtime():
+            messagebox.showerror(
+                "Packaging Error",
+                "Runtime dependency installation is disabled in packaged builds. Please use a complete release bundle.",
+            )
+            self.quit()
+            return
+
         def on_success():
             self.yt_dlp_available = True
             messagebox.showinfo("Success", "yt-dlp installed successfully!")

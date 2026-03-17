@@ -27,6 +27,41 @@ MAX_DOWNLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 SAFE_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def _is_frozen_runtime() -> bool:
+    return bool(getattr(sys, 'frozen', False))
+
+
+def _bundled_runtime_dir() -> Optional[str]:
+    if not _is_frozen_runtime():
+        return None
+    return os.path.dirname(sys.executable)
+
+
+def _binary_candidates(tool_name: str) -> List[str]:
+    if os.name == 'nt':
+        return [f'{tool_name}.exe', tool_name]
+    return [tool_name]
+
+
+def _resolve_bundled_binary(tool_name: str) -> Optional[str]:
+    runtime_dir = _bundled_runtime_dir()
+    if not runtime_dir:
+        return None
+    for candidate in _binary_candidates(tool_name):
+        candidate_path = os.path.join(runtime_dir, candidate)
+        if os.path.isfile(candidate_path):
+            return candidate_path
+    return None
+
+
+def resolve_ffmpeg_binary() -> Optional[str]:
+    return _resolve_bundled_binary('ffmpeg') or shutil.which('ffmpeg')
+
+
+def resolve_ffprobe_binary() -> Optional[str]:
+    return _resolve_bundled_binary('ffprobe') or shutil.which('ffprobe')
+
+
 class DownloadPipelineError(RuntimeError):
     """Base exception for user-facing download pipeline failures."""
 
@@ -138,10 +173,25 @@ class Downloader:
 
     def _yt_dlp_base_command(self) -> List[str]:
         """Return preferred yt-dlp command form (binary or module fallback)."""
+        bundled = _resolve_bundled_binary('yt-dlp')
+        if bundled:
+            return [bundled]
+
         yt_dlp_bin = shutil.which('yt-dlp')
         if yt_dlp_bin:
             return [yt_dlp_bin]
+
+        if _is_frozen_runtime():
+            raise RuntimeError('Bundled yt-dlp binary is missing from this packaged build.')
+
         return [sys.executable, '-m', 'yt_dlp']
+
+    def _yt_dlp_ffmpeg_args(self) -> List[str]:
+        ffmpeg_bin = resolve_ffmpeg_binary()
+        ffprobe_bin = resolve_ffprobe_binary()
+        if ffmpeg_bin and ffprobe_bin:
+            return ['--ffmpeg-location', os.path.dirname(ffmpeg_bin)]
+        return []
 
     def _emit_stage(self, progress_hook: Optional[Callable], stage: str):
         if progress_hook:
@@ -149,7 +199,7 @@ class Downloader:
 
     def has_ffmpeg(self) -> bool:
         """Check ffmpeg availability for merge workflows."""
-        return bool(shutil.which('ffmpeg'))
+        return bool(resolve_ffmpeg_binary() and resolve_ffprobe_binary())
 
     def extract_info(self, url: str):
         """Extract video/playlist info without downloading."""
@@ -582,7 +632,7 @@ class Downloader:
             '--file-access-retries', '3',
             '-f', plan.selector,
             '-o', outtmpl,
-        ]
+        ] + self._yt_dlp_ffmpeg_args()
 
         if item.item_type == 'audio':
             cmd.extend(['-x', '--audio-format', 'mp3', '--audio-quality', str(item.audio_format or '192')])
@@ -737,9 +787,9 @@ def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
                 safe_path = file_path.replace('\\', '/').replace("'", "'\\''")
                 file_handle.write(f"file '{safe_path}'\n")
 
-        ffmpeg_path = shutil.which('ffmpeg')
+        ffmpeg_path = resolve_ffmpeg_binary()
         if not ffmpeg_path:
-            raise RuntimeError('FFmpeg not found. Please install FFmpeg and add it to PATH.')
+            raise RuntimeError('FFmpeg binary not found in bundled runtime tools or PATH.')
 
         ffmpeg_cmd = [
             ffmpeg_path, '-y', '-f', 'concat', '-safe', '0',
