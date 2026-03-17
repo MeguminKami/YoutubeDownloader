@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
@@ -40,8 +43,16 @@ jobs:
       VERSION: ${{ github.ref_name }}
 
     steps:
+      - name: Print JavaScript action runtime compatibility mode
+        shell: pwsh
+        run: |
+          Write-Host "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=$env:FORCE_JAVASCRIPT_ACTIONS_TO_NODE24"
+          if ($env:FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 -ne 'true') {
+            throw "Node 24 compatibility override is not enabled."
+          }
+
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Validate release tag format
         shell: bash
@@ -52,7 +63,7 @@ jobs:
           fi
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -291,7 +302,7 @@ jobs:
           Write-Host "Packaged artifact: $archivePath"
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.platform }}
           path: release-assets/*.zip
@@ -303,8 +314,14 @@ jobs:
     needs: build
 
     steps:
+      - name: Print JavaScript action runtime compatibility mode
+        shell: bash
+        run: |
+          echo "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=${FORCE_JAVASCRIPT_ACTIONS_TO_NODE24}"
+          [ "${FORCE_JAVASCRIPT_ACTIONS_TO_NODE24}" = "true" ] || { echo "Node 24 compatibility override is not enabled."; exit 1; }
+
       - name: Download all packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
@@ -332,6 +349,7 @@ jobs:
           ls -la release-assets
 
       - name: Create or update release with executable assets
+        # Keep v2: latest stable major available for this action (currently uses node20).
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
