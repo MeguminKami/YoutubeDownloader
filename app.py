@@ -359,6 +359,30 @@ class YouTubeDownloaderApp(ctk.CTk):
         )
         return bool(pattern.search(url.strip()))
 
+    def _split_sentences_per_line(self, text: str) -> str:
+        """Return readable popup text with one sentence per line."""
+        if not text:
+            return "Unknown error."
+
+        normalized = ' '.join(str(text).replace('\r', ' ').replace('\n', ' ').split())
+        normalized = re.sub(r'^ERROR:\s*', '', normalized, flags=re.IGNORECASE)
+
+        # Convert sentence boundaries to line breaks while keeping URLs intact.
+        normalized = re.sub(r'(?<=[.!?])\s+', '\n', normalized)
+        return normalized.strip() if normalized.strip() else "Unknown error."
+
+    def _format_processing_error(self, raw_error: str) -> str:
+        """Map common yt-dlp extraction failures to clear user instructions."""
+        lower = (raw_error or '').lower()
+        if "sign in to confirm you're not a bot" in lower or "sign in to confirm you\u2019re not a bot" in lower:
+            return "\n".join([
+                "YouTube asked for account verification before allowing this request.",
+                "Export fresh browser cookies and save them to cookies.txt in this app folder.",
+                "Restart the app and try this URL again.",
+            ])
+
+        return self._split_sentences_per_line(raw_error)
+
     def add_to_queue(self):
         """Add URL to download queue"""
         if not self.yt_dlp_available:
@@ -393,7 +417,8 @@ class YouTubeDownloaderApp(ctk.CTk):
             info = downloader.extract_info(url)
             self.after(0, lambda: self.show_options_dialog(url, info))
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Error", f"Error processing URL: {str(e)}"))
+            formatted_error = self._format_processing_error(str(e))
+            self.after(0, lambda msg=formatted_error: messagebox.showerror("Error Processing URL", msg))
         finally:
             self.after(0, lambda: self.url_entry.configure(state="normal"))
 
