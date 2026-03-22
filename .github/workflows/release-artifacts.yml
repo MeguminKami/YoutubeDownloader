@@ -21,25 +21,25 @@ jobs:
         include:
           - os: windows-latest
             platform: windows
-            verify_path: dist/YouTubeDownloaderPro.exe
-            package_path: dist/YouTubeDownloaderPro.exe
+            verify_path: dist/YoutubeGrab.exe
+            package_path: dist/YoutubeGrab.exe
             package_type: file
             archive_ext: zip
           - os: macos-latest
             platform: macos
-            verify_path: dist/YouTubeDownloaderPro.app
-            package_path: dist/YouTubeDownloaderPro.app
+            verify_path: dist/YoutubeGrab.app
+            package_path: dist/YoutubeGrab.app
             package_type: dir
             archive_ext: zip
           - os: ubuntu-latest
             platform: linux
-            verify_path: dist/YouTubeDownloaderPro/YouTubeDownloaderPro
-            package_path: dist/YouTubeDownloaderPro
+            verify_path: dist/YoutubeGrab/YoutubeGrab
+            package_path: dist/YoutubeGrab
             package_type: dir
             archive_ext: zip
 
     env:
-      APP_NAME: YouTubeDownloaderPro
+      APP_NAME: YoutubeGrab
       VERSION: ${{ github.ref_name }}
 
     steps:
@@ -158,7 +158,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean YouTubeDownloaderPro.spec
+          python -m PyInstaller --noconfirm --clean YoutubeGrab.spec
 
       - name: Validate onefile packaging inputs (Windows)
         if: runner.os == 'Windows'
@@ -180,7 +180,7 @@ jobs:
             }
           }
 
-          if (!(Test-Path 'dist/YouTubeDownloaderPro.exe')) {
+          if (!(Test-Path 'dist/YoutubeGrab.exe')) {
             throw "Onefile executable was not produced."
           }
 

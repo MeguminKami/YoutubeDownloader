@@ -27,6 +27,12 @@ MAX_DOWNLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 # Security: Allowed characters for filenames (prevents path traversal)
 SAFE_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+SUBPROCESS_TEXT_KWARGS = {
+    'text': True,
+    'encoding': 'utf-8',
+    'errors': 'replace',
+}
+
 
 def resolve_runtime_tool(tool_name: str, allow_python_module_fallback: bool = False) -> Optional[List[str]]:
     """
@@ -125,13 +131,15 @@ class Downloader:
     _DOWNLOAD_PERCENT_RE = re.compile(r"\[download\]\s+(?P<pct>\d+(?:\.\d+)?)%")
     _DOWNLOAD_SPEED_RE = re.compile(r"\bat\s+(?P<speed>[^\s]+/s)")
     _DOWNLOAD_ETA_RE = re.compile(r"\bETA\s+(?P<eta>[0-9:]+)")
+    _PLAYLIST_ITEM_RE = re.compile(r"\[download\]\s+Downloading\s+(?:item|video)\s+(?P<index>\d+)\s+of\s+(?P<total>\d+)", re.IGNORECASE)
     _FPS_RE = re.compile(r"\b(?P<fps>\d+(?:\.\d+)?)fps\b", re.IGNORECASE)
     _HEIGHT_RE = re.compile(r"(?:\d{2,5}x(?P<h1>\d{2,5})|(?P<h2>\d{3,4})p)")
     _TBR_RE = re.compile(r"\b(?P<tbr>\d+(?:\.\d+)?)k\b", re.IGNORECASE)
     _SIZE_RE = re.compile(r"~?\s*(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>[KMGT]i?B)")
 
-    def __init__(self, progress_callback: Optional[Callable] = None):
+    def __init__(self, progress_callback: Optional[Callable] = None, cookie_manager=None):
         self.progress_callback = progress_callback
+        self.cookie_manager = cookie_manager
 
     def _snapshot_files(self, folder: str) -> set:
         paths = set()
@@ -166,14 +174,22 @@ class Downloader:
 
     def _base_ydl_opts(self) -> Dict[str, Any]:
         """Shared yt-dlp defaults for metadata extraction paths."""
-        return {
+        opts = {
             'retries': 10,
             'fragment_retries': 10,
             'extractor_retries': 5,
             'file_access_retries': 3,
             'concurrent_fragment_downloads': 1,
             'http_chunk_size': 10 * 1024 * 1024,
+            'remotecomponents': ['ejs:github'],  # Enable JS challenge solver
         }
+
+        # Add cookie file if available
+        if self.cookie_manager:
+            auth_opts = self.cookie_manager.get_ydl_opts()
+            opts.update(auth_opts)
+
+        return opts
 
     def _yt_dlp_base_command(self) -> List[str]:
         """Return preferred yt-dlp command form using unified runtime resolver."""
@@ -196,6 +212,12 @@ class Downloader:
     def _emit_stage(self, progress_hook: Optional[Callable], stage: str):
         if progress_hook:
             progress_hook({'status': 'stage', 'stage': stage})
+
+    def _playlist_entry_count(self, item) -> int:
+        playlist_items = (getattr(item, 'playlist_items', None) or '').strip()
+        if not playlist_items:
+            return 0
+        return len([part for part in playlist_items.split(',') if part.strip()])
 
     def has_ffmpeg(self) -> bool:
         """Check ffmpeg availability for merge workflows."""
@@ -228,14 +250,25 @@ class Downloader:
             return {'video_formats': [], 'error': 'Invalid URL'}
 
         try:
-            command = self._yt_dlp_base_command() + ['--list-formats', url]
+            command = self._yt_dlp_base_command() + [
+                '--list-formats',
+                '--remote-components', 'ejs:github',  # Enable JS challenge solver
+                url
+            ]
+
+            # Add cookie file if available
+            if self.cookie_manager:
+                cookie_file = self.cookie_manager.get_cookie_file_path()
+                if cookie_file and os.path.exists(cookie_file):
+                    command.extend(['--cookies', cookie_file])
+
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             result = subprocess.run(
                 command,
                 capture_output=True,
-                text=True,
                 creationflags=creationflags,
                 timeout=120,
+                **SUBPROCESS_TEXT_KWARGS,
             )
 
             output = f"{result.stdout}\n{result.stderr}".strip()
@@ -554,13 +587,15 @@ class Downloader:
         def _fallback_selector_for_height(height_value: Optional[int]) -> str:
             if height_value:
                 height = int(height_value)
+                # More comprehensive fallback with multiple strategies
                 return (
-                    f"best[height={height}][ext=mp4]/best[height={height}]"
-                    f"/best[height>={height}][ext=mp4]/best[height>={height}]"
-                    f"/best[height<={height}][ext=mp4]/best[height<={height}]"
-                    f"/best[ext=mp4]/best"
+                    f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/"
+                    f"bestvideo[height={height}]+bestaudio/best[height={height}]/"
+                    f"best[height<={height}][ext=mp4]/best[height<={height}]/"
+                    f"best[height={height}][ext=mp4]/best[height={height}]/"
+                    f"bestvideo+bestaudio/best[ext=mp4]/best"
                 )
-            return 'best[ext=mp4]/best'
+            return 'bestvideo+bestaudio/best[ext=mp4]/best'
 
         # Rule A/B for explicit format selection from listed formats.
         if selected_video:
@@ -569,6 +604,7 @@ class Downloader:
                     raise NoCompatibleFormatError('No compatible audio-only stream found for this quality')
                 return DownloadPlan(
                     mode='merge',
+                    # Add "best" as ultimate fallback
                     selector=f"{selected_video}+{selected_audio}/{_fallback_selector_for_height(selected_height)}",
                     needs_merge=True,
                     video_format_id=selected_video,
@@ -576,6 +612,7 @@ class Downloader:
                 )
             return DownloadPlan(
                 mode='direct',
+                # Add "best" as ultimate fallback
                 selector=f"{selected_video}/{_fallback_selector_for_height(selected_height)}",
                 needs_merge=False,
                 video_format_id=selected_video,
@@ -587,9 +624,9 @@ class Downloader:
             return DownloadPlan(
                 mode='auto',
                 selector=(
-                    f"best[height<={height}][ext=mp4]/best[height<={height}]"
-                    f"/best[height>={height}][ext=mp4]/best[height>={height}]"
-                    f"/best[ext=mp4]/best"
+                    f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/"
+                    f"best[height<={height}][ext=mp4]/best[height<={height}]/"
+                    f"bestvideo+bestaudio/best"
                 ),
                 needs_merge=False,
             )
@@ -630,9 +667,16 @@ class Downloader:
             '--fragment-retries', '10',
             '--extractor-retries', '5',
             '--file-access-retries', '3',
+            '--remote-components', 'ejs:github',  # Enable JS challenge solver
             '-f', plan.selector,
             '-o', outtmpl,
         ] + self._yt_dlp_ffmpeg_args()
+
+        # Add cookie file if available
+        if self.cookie_manager:
+            cookie_file = self.cookie_manager.get_cookie_file_path()
+            if cookie_file and os.path.exists(cookie_file):
+                cmd.extend(['--cookies', cookie_file])
 
         if item.item_type == 'audio':
             cmd.extend(['-x', '--audio-format', 'mp3', '--audio-quality', str(item.audio_format or '192')])
@@ -654,14 +698,17 @@ class Downloader:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
             bufsize=1,
             creationflags=creationflags,
+            **SUBPROCESS_TEXT_KWARGS,
         )
 
         captured_lines: List[str] = []
         emitted_audio_stage = False
         emitted_merge_stage = False
+        playlist_started_count = 0
+        playlist_selected_total = self._playlist_entry_count(item) if item.is_playlist and item.merge_playlist else 0
+        last_playlist_source_index = None
 
         def _cancel_process_and_raise():
             try:
@@ -685,6 +732,23 @@ class Downloader:
             captured_lines.append(line)
 
             lower_line = line.lower()
+            if item.is_playlist and item.merge_playlist:
+                playlist_match = self._PLAYLIST_ITEM_RE.search(line)
+                if playlist_match and progress_hook:
+                    source_index = int(playlist_match.group('index'))
+                    source_total = int(playlist_match.group('total'))
+                    if source_index != last_playlist_source_index:
+                        last_playlist_source_index = source_index
+                        playlist_started_count += 1
+                        progress_hook({
+                            'status': 'playlist_item',
+                            'playlist_index': playlist_started_count,
+                            'playlist_total': playlist_selected_total or source_total or playlist_started_count,
+                            'playlist_source_index': source_index,
+                            'playlist_source_total': source_total,
+                        })
+                    continue
+
             if plan.needs_merge and not emitted_audio_stage and 'audio' in lower_line and 'destination' in lower_line:
                 emitted_audio_stage = True
                 self._emit_stage(progress_hook, 'downloading audio stream')
@@ -748,14 +812,20 @@ class Downloader:
             raise MissingFFmpegError('FFmpeg is missing. Install FFmpeg and retry merge-required downloads.')
 
         if 'requested format is not available' in lower or 'no video formats found' in lower:
-            raise NoCompatibleFormatError('Requested format is no longer available for this video')
+            # Provide more helpful error message with output details
+            error_msg = 'The selected quality is no longer available for this video.'
+            if plan.video_format_id or plan.audio_format_id:
+                error_msg += f'\n\nTried format: video={plan.video_format_id or "auto"}, audio={plan.audio_format_id or "auto"}'
+            error_msg += '\n\nTry selecting a different quality or use automatic quality selection.'
+            raise NoCompatibleFormatError(error_msg)
 
         if plan.needs_merge and ('[merger]' in lower or 'unable to merge' in lower):
             raise MergeFailureError('Download completed but merging streams failed')
 
+        # Include actual error output for debugging
         if plan.needs_merge:
-            raise MergeFailureError('Merged download failed')
-        raise DirectDownloadError('Direct download failed')
+            raise MergeFailureError(f'Merged download failed: {output[:200]}')
+        raise DirectDownloadError(f'Download failed: {output[:200]}')
 
 
 def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
@@ -800,9 +870,9 @@ def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
         result = subprocess.run(
             ffmpeg_cmd,
             capture_output=True,
-            text=True,
             creationflags=creationflags,
             timeout=3600,
+            **SUBPROCESS_TEXT_KWARGS,
         )
 
         if result.returncode != 0:
@@ -820,9 +890,9 @@ def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
             result = subprocess.run(
                 ffmpeg_cmd,
                 capture_output=True,
-                text=True,
                 creationflags=creationflags,
                 timeout=7200,
+                **SUBPROCESS_TEXT_KWARGS,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"FFmpeg error: {result.stderr}")

@@ -1,0 +1,8 @@
+cookies.txt
+cache/
+.ytgrab/
+__pycache__/
+*.pyc
+build/
+dist/
+ui/logo.ico

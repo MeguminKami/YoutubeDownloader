@@ -1,21 +1,7 @@
 """Data models for the application."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
-
-
-@dataclass
-class QualityOption:
-    """UI-facing quality option derived from `yt-dlp --list-formats` output."""
-    format_id: str
-    label: str
-    height: Optional[int]
-    ext: str
-    fps: Optional[float]
-    has_audio: bool
-    has_video: bool
-    requires_merge: bool
-    audio_format_id: Optional[str] = None
-    notes: str = ""
 
 
 @dataclass
@@ -38,7 +24,7 @@ class DownloadItem:
     merge_playlist: bool = False
     custom_name: Optional[str] = None
     title: str = "Loading..."
-    status: str = "Pending"
+    status: str = "queued"
     estimated_size: Optional[int] = None  # in bytes
     quality_label: Optional[str] = None  # Human-readable quality label (e.g., "1080p 60fps (MP4)")
     height: Optional[int] = None  # Video height for fallback format selection
@@ -46,3 +32,12 @@ class DownloadItem:
     selected_audio_format_id: Optional[str] = None
     selected_video_format_id: Optional[str] = None
     playlist_items: Optional[str] = None
+    channel: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    cached_thumbnail_path: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    source_url: Optional[str] = None
+    output_path: Optional[str] = None
+    error_message: Optional[str] = None
+    queued_at: datetime = field(default_factory=datetime.now)
+    finished_at: Optional[datetime] = None

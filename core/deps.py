@@ -8,6 +8,13 @@ import subprocess
 from typing import Callable, List, Optional
 
 
+SUBPROCESS_TEXT_KWARGS = {
+    'text': True,
+    'encoding': 'utf-8',
+    'errors': 'replace',
+}
+
+
 def is_frozen_runtime() -> bool:
     return bool(getattr(sys, "frozen", False))
 
@@ -104,8 +111,8 @@ def install_yt_dlp(progress_callback: Optional[Callable[[str], None]] = None) ->
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
+            bufsize=1,
+            **SUBPROCESS_TEXT_KWARGS,
         )
 
         output_lines = []
