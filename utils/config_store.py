@@ -35,6 +35,11 @@ def _config_dir() -> str:
     return os.getcwd()
 
 
+def get_app_data_dir() -> str:
+    """Return writable runtime data directory for this app."""
+    return _config_dir()
+
+
 def _config_path(filename: str = "ui_state.json") -> str:
     return os.path.join(_config_dir(), filename)
 

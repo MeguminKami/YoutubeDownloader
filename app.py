@@ -725,6 +725,7 @@ class YoutubeGrabApp(ctk.CTk):
         # Show cookie input dialog
         def on_save_cookies(cookie_content: str):
             try:
+                os.makedirs(os.path.dirname(self.cookie_manager.cookie_file), exist_ok=True)
                 with open(self.cookie_manager.cookie_file, "w", encoding="utf-8") as f:
                     f.write(cookie_content)
 

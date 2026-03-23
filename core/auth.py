@@ -4,9 +4,41 @@ YouTube Authentication via cookies.txt
 This module manages a local cookies.txt file for YouTube authentication.
 """
 import os
+import shutil
 import subprocess
+import sys
 import time
 from typing import Optional
+
+from utils.config_store import get_app_data_dir
+
+
+def _default_app_dir() -> str:
+    """Return persistent runtime directory for config/auth files."""
+    return get_app_data_dir()
+
+
+def _legacy_cookie_candidates() -> list[str]:
+    candidates: list[str] = []
+
+    # Historical dev path fallback.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(project_root, "cookies.txt"))
+
+    # Current working directory fallback.
+    candidates.append(os.path.join(os.getcwd(), "cookies.txt"))
+
+    # Frozen executable directory fallback.
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "cookies.txt"))
+
+    unique: list[str] = []
+    for path in candidates:
+        normalized = os.path.abspath(path)
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
 
 
 AUTH_COOKIE_NAMES = {
@@ -43,9 +75,27 @@ class CookieManager:
         if app_dir:
             self.app_dir = app_dir
         else:
-            self.app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.app_dir = _default_app_dir()
 
+        os.makedirs(self.app_dir, exist_ok=True)
         self.cookie_file = os.path.join(self.app_dir, 'cookies.txt')
+        self._migrate_legacy_cookie_file()
+
+    def _migrate_legacy_cookie_file(self) -> None:
+        if os.path.exists(self.cookie_file):
+            return
+
+        for legacy_path in _legacy_cookie_candidates():
+            if legacy_path == os.path.abspath(self.cookie_file):
+                continue
+            if not os.path.isfile(legacy_path):
+                continue
+
+            try:
+                shutil.copy2(legacy_path, self.cookie_file)
+                return
+            except Exception:
+                continue
 
     def has_valid_cookies(self) -> bool:
         """Check if valid cookies.txt file exists."""
@@ -174,6 +224,12 @@ class CookieManager:
                 '--no-warnings',
                 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'  # Short test video
             ]
+
+            # Prefer bundled/runtime-resolved yt-dlp in packaged builds.
+            from core.downloader import resolve_runtime_tool
+            resolved = resolve_runtime_tool('yt-dlp', allow_python_module_fallback=True)
+            if resolved:
+                cmd = resolved + cmd[1:]
 
             result = subprocess.run(
                 cmd,
