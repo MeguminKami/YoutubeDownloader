@@ -85,6 +85,11 @@ class FormatDiscoveryError(DownloadPipelineError):
         super().__init__(reason, "format_discovery_failed")
 
 
+class InvalidCookiesError(DownloadPipelineError):
+    def __init__(self, reason: str = 'Cookie authentication failed'):
+        super().__init__(reason, "invalid_cookies")
+
+
 class NoCompatibleFormatError(DownloadPipelineError):
     def __init__(self, reason: str):
         super().__init__(reason, "no_compatible_format")
@@ -136,6 +141,13 @@ class Downloader:
     _HEIGHT_RE = re.compile(r"(?:\d{2,5}x(?P<h1>\d{2,5})|(?P<h2>\d{3,4})p)")
     _TBR_RE = re.compile(r"\b(?P<tbr>\d+(?:\.\d+)?)k\b", re.IGNORECASE)
     _SIZE_RE = re.compile(r"~?\s*(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>[KMGT]i?B)")
+    _COOKIE_AUTH_ERROR_MARKERS = (
+        "sign in to confirm you're not a bot",
+        "use --cookies-from-browser or --cookies",
+        "cookies are no longer valid",
+        "authentication required",
+        "please sign in",
+    )
 
     def __init__(self, progress_callback: Optional[Callable] = None, cookie_manager=None):
         self.progress_callback = progress_callback
@@ -250,34 +262,15 @@ class Downloader:
             return {'video_formats': [], 'error': 'Invalid URL'}
 
         try:
-            command = self._yt_dlp_base_command() + [
-                '--list-formats',
-                '--remote-components', 'ejs:github',  # Enable JS challenge solver
-                url
-            ]
+            probe = self.probe_cookie_validity_with_list_formats(url)
+            if not probe.get('valid'):
+                code = probe.get('error_code') or 'format_discovery_failed'
+                message = probe.get('error') or 'yt-dlp failed to list formats'
+                if code == 'invalid_cookies':
+                    raise InvalidCookiesError(message)
+                raise FormatDiscoveryError(message)
 
-            # Add cookie file if available
-            if self.cookie_manager:
-                cookie_file = self.cookie_manager.get_cookie_file_path()
-                if cookie_file and os.path.exists(cookie_file):
-                    command.extend(['--cookies', cookie_file])
-
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                creationflags=creationflags,
-                timeout=120,
-                **SUBPROCESS_TEXT_KWARGS,
-            )
-
-            output = f"{result.stdout}\n{result.stderr}".strip()
-            if result.returncode != 0:
-                raise FormatDiscoveryError(output or 'yt-dlp failed to list formats')
-
-            all_formats = self.parse_list_formats_output(result.stdout)
-            if not all_formats:
-                raise FormatDiscoveryError('No parseable formats found in yt-dlp output')
+            all_formats = probe.get('all_formats') or []
 
             quality_options = self.build_quality_options(all_formats)
             if not quality_options:
@@ -294,6 +287,62 @@ class Downloader:
             return {'video_formats': [], 'error': 'Timed out while fetching formats'}
         except Exception as exc:
             return {'video_formats': [], 'error': str(exc)}
+
+    def _build_list_formats_command(self, url: str) -> List[str]:
+        command = self._yt_dlp_base_command() + [
+            '--list-formats',
+            '--remote-components', 'ejs:github',
+            url,
+        ]
+
+        if self.cookie_manager:
+            cookie_file = self.cookie_manager.get_cookie_file_path()
+            if cookie_file and os.path.exists(cookie_file):
+                command.extend(['--cookies', cookie_file])
+
+        return command
+
+    def _run_list_formats(self, url: str, timeout: int = 120) -> subprocess.CompletedProcess:
+        command = self._build_list_formats_command(url)
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        return subprocess.run(
+            command,
+            capture_output=True,
+            creationflags=creationflags,
+            timeout=timeout,
+            **SUBPROCESS_TEXT_KWARGS,
+        )
+
+    def _is_cookie_auth_failure(self, output: str) -> bool:
+        lower = (output or '').lower()
+        return any(marker in lower for marker in self._COOKIE_AUTH_ERROR_MARKERS)
+
+    def probe_cookie_validity_with_list_formats(self, url: str) -> Dict[str, Any]:
+        """Run list-formats and report whether yt-dlp returned a parseable format list."""
+        if not url or not url.strip():
+            return {'valid': False, 'all_formats': [], 'error': 'Please enter a YouTube URL', 'error_code': 'invalid_url'}
+
+        if not self._is_valid_url(url):
+            return {'valid': False, 'all_formats': [], 'error': 'Invalid URL', 'error_code': 'invalid_url'}
+
+        try:
+            result = self._run_list_formats(url)
+        except subprocess.TimeoutExpired:
+            return {'valid': False, 'all_formats': [], 'error': 'Timed out while fetching formats', 'error_code': 'format_discovery_failed'}
+        except Exception as exc:
+            return {'valid': False, 'all_formats': [], 'error': str(exc), 'error_code': 'format_discovery_failed'}
+
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 0:
+            error_code = 'invalid_cookies' if self._is_cookie_auth_failure(output) else 'format_discovery_failed'
+            return {'valid': False, 'all_formats': [], 'error': output or 'yt-dlp failed to list formats', 'error_code': error_code}
+
+        all_formats = self.parse_list_formats_output(result.stdout)
+        if not all_formats:
+            error_code = 'invalid_cookies' if self._is_cookie_auth_failure(output) else 'format_discovery_failed'
+            return {'valid': False, 'all_formats': [], 'error': 'No parseable formats found in yt-dlp output', 'error_code': error_code}
+
+        return {'valid': True, 'all_formats': all_formats, 'error': None, 'error_code': None}
 
     def parse_list_formats_output(self, output: str) -> List[Dict[str, Any]]:
         """Parse `yt-dlp --list-formats` table output into normalized stream entries."""
@@ -655,12 +704,19 @@ class Downloader:
             self._emit_stage(progress_hook, 'downloading video stream')
 
         temp_folder = None
+        playlist_folder = None
         outtmpl = os.path.join(folder, '%(title).200s.%(ext)s')
         before_files = self._snapshot_files(folder)
 
         if item.is_playlist and item.merge_playlist:
             temp_folder = tempfile.mkdtemp(prefix='ytdl_playlist_', dir=folder)
             outtmpl = os.path.join(temp_folder, '%(playlist_index)03d - %(title).150s.%(ext)s')
+        elif item.is_playlist and not item.merge_playlist:
+            # Create a folder named after the playlist for separated files
+            playlist_name = sanitize_filename(item.title if item.title else 'Playlist')
+            playlist_folder = os.path.join(folder, playlist_name)
+            os.makedirs(playlist_folder, exist_ok=True)
+            outtmpl = os.path.join(playlist_folder, '%(playlist_index)03d - %(title).150s.%(ext)s')
 
         cmd = self._yt_dlp_base_command() + [
             '--retries', '10',

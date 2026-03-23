@@ -8,7 +8,7 @@ import threading
 import webbrowser
 from datetime import datetime
 from tkinter import TclError, filedialog, messagebox
-from typing import Iterable, List, Optional, Sequence
+from typing import Callable, Iterable, List, Optional, Sequence
 
 import customtkinter as ctk
 
@@ -23,7 +23,7 @@ from core.downloader import (
     NoCompatibleFormatError,
 )
 from core.models import DownloadItem
-from ui.dialogs import InstallerDialog, OptionsDialog, ProgressDialog
+from ui.dialogs import InstallerDialog, OptionsDialog, ProgressDialog, CookieInputDialog
 from ui.theme import ThemeManager
 from ui.visual_assets import VisualAssets
 from utils.format import format_bytes, format_eta, format_speed, SpeedSmoother
@@ -59,6 +59,7 @@ def _format_timestamp(value: Optional[datetime]) -> str:
 QUEUE_THUMB_SIZE = (112, 63)
 HISTORY_THUMB_SIZE = (96, 54)
 PROGRESS_THUMB_SIZE = (96, 54)
+COOKIE_PROBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
 class YoutubeGrabApp(ctk.CTk):
@@ -67,7 +68,7 @@ class YoutubeGrabApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("YTGrab - YouTube Downloader")
+        self.title("YoutubeGrab")
         self.geometry("1180x860")
         self.minsize(940, 680)
 
@@ -80,6 +81,8 @@ class YoutubeGrabApp(ctk.CTk):
         self.download_queue: List[DownloadItem] = []
         self.download_history: List[DownloadItem] = []
         self.yt_dlp_available = False
+        self.cookies_validated = False
+        self.cookies_validation_in_progress = False
         self._download_active = False
         self._processing_url = False
         self._cancel_requested = False
@@ -108,7 +111,7 @@ class YoutubeGrabApp(ctk.CTk):
     def _load_brand_assets(self):
         """Create the application logo and window icon from programmatic assets."""
         try:
-            self._brand_logo_image = self.visuals.brand_mark(36)
+            self._brand_logo_image = self.visuals.brand_mark(52)
         except Exception:
             self._brand_logo_image = None
 
@@ -306,13 +309,13 @@ class YoutubeGrabApp(ctk.CTk):
 
         ctk.CTkLabel(
             inner,
-            text="Paste a YouTube link below, then click Download to choose the format and add it to the queue.",
+            text= "Paste a YouTube link below, then click Queue to choose format and quality.",
             font=ctk.CTkFont(size=13),
             text_color=self.colors.text_secondary,
-            anchor="w",
-            justify="left",
+            anchor="center",
+            justify="center",
             wraplength=760,
-        ).pack(anchor="w", pady=(0, 12))
+        ).pack(anchor="center", pady=(0, 12))
 
         input_row = ctk.CTkFrame(inner, fg_color="transparent")
         input_row.pack(fill="x")
@@ -460,19 +463,11 @@ class YoutubeGrabApp(ctk.CTk):
         self.queue_footer = ctk.CTkFrame(panel, fg_color="transparent")
         self.queue_footer.pack(fill="x", padx=22, pady=(0, 22))
 
-        ctk.CTkLabel(
-            self.queue_footer,
-            text="Choose a folder only when you are ready to start the batch.",
-            font=ctk.CTkFont(size=12),
-            text_color=self.colors.text_muted,
-        ).pack(side="left")
-
         self.download_all_button = ctk.CTkButton(
             self.queue_footer,
             text="Download All",
             image=self.visuals.icon("download", 16, self.colors.primary_fg),
             compound="left",
-            width=176,
             height=48,
             corner_radius=16,
             fg_color=self.colors.primary,
@@ -481,7 +476,7 @@ class YoutubeGrabApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self.start_download,
         )
-        self.download_all_button.pack(side="right")
+        self.download_all_button.pack(fill="x", expand=True)
 
         return panel
 
@@ -514,6 +509,24 @@ class YoutubeGrabApp(ctk.CTk):
             text_color=self.colors.text_muted,
         )
         self.history_summary_label.pack(anchor="w", pady=(3, 0))
+
+        self.clear_failed_button = ctk.CTkButton(
+            header,
+            text="Clear Failed",
+            image=self.visuals.icon("alert_circle", 16, self.colors.danger),
+            compound="left",
+            width=120,
+            height=36,
+            corner_radius=12,
+            fg_color=self.colors.surface_alt,
+            hover_color=self.colors.secondary_hover,
+            text_color=self.colors.danger,
+            border_width=1,
+            border_color=self.colors.border,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.clear_failed_history,
+        )
+        self.clear_failed_button.pack(side="right", padx=(0, 8))
 
         self.clear_history_button = ctk.CTkButton(
             header,
@@ -638,10 +651,12 @@ class YoutubeGrabApp(ctk.CTk):
                 return
 
             self.yt_dlp_available = True
+            self._validate_cookies(show_popup_on_invalid=True)
             return
 
         if check_yt_dlp():
             self.yt_dlp_available = True
+            self._validate_cookies(show_popup_on_invalid=True)
         else:
             self._show_installer()
 
@@ -657,6 +672,7 @@ class YoutubeGrabApp(ctk.CTk):
 
         def on_success():
             self.yt_dlp_available = True
+            self._validate_cookies(show_popup_on_invalid=True)
             messagebox.showinfo("Success", "yt-dlp installed successfully.")
 
         def on_failure():
@@ -691,12 +707,13 @@ class YoutubeGrabApp(ctk.CTk):
     def show_cookie_help(self):
         """Show information about cookies.txt."""
         auth_status = self.cookie_manager.get_cookie_status()
+        has_cookie_file = bool(auth_status.get("has_cookie_file"))
 
-        if auth_status["authenticated"]:
+        if has_cookie_file and self.cookies_validated:
             response = messagebox.askyesno(
                 "Cookie Status",
                 (
-                    "Cookies are loaded and ready.\n\n"
+                    "Cookies are loaded and working.\n\n"
                     f"Cookie file location:\n{self.cookie_manager.cookie_file}\n\n"
                     "Do you want to remove the current cookies?"
                 ),
@@ -705,68 +722,129 @@ class YoutubeGrabApp(ctk.CTk):
                 self._remove_cookies()
             return
 
-        cookie_path = self.cookie_manager.cookie_file
-        status_note = ""
-        if auth_status.get("has_cookie_file"):
-            if auth_status.get("reason") == "expired_auth_cookies":
-                status_note = "Current status: the file exists, but the YouTube auth cookies are expired.\n\n"
-            elif auth_status.get("reason") == "missing_auth_cookies":
-                status_note = "Current status: the file exists, but it does not contain valid YouTube auth cookies.\n\n"
-            elif auth_status.get("reason") == "missing_youtube_cookies":
-                status_note = "Current status: the file exists, but it does not contain youtube.com/google.com cookies.\n\n"
-            elif auth_status.get("reason") == "unreadable_file":
-                status_note = "Current status: the file exists, but it could not be parsed.\n\n"
+        # Show cookie input dialog
+        def on_save_cookies(cookie_content: str):
+            try:
+                with open(self.cookie_manager.cookie_file, "w", encoding="utf-8") as f:
+                    f.write(cookie_content)
 
-        messagebox.showinfo(
-            "YouTube Authentication - cookies.txt",
-            (
-                status_note +
-                "To reduce YouTube bot-detection issues, provide cookies from your browser.\n\n"
-                "Steps:\n"
-                "1. Install a browser extension that exports cookies.txt.\n"
-                "   - Chrome or Edge: Get cookies.txt LOCALLY\n"
-                "   - Firefox: cookies.txt\n"
-                "2. Open YouTube.com while logged in.\n"
-                "3. Export cookies for youtube.com.\n"
-                f"4. Save the file as cookies.txt in:\n{cookie_path}\n"
-                "5. Restart the app or click the cookie button again.\n\n"
-                "The cookie button turns green when valid auth cookies are detected."
-            ),
-        )
+                # Validate cookies immediately
+                def _after_validation(validated: bool):
+                    if validated:
+                        messagebox.showinfo("Success", "Cookies saved and validated successfully!")
+                    else:
+                        messagebox.showwarning(
+                            "Cookies Saved",
+                            "Cookies were saved, but validation failed.\n\n"
+                            "They may not work correctly with YouTube."
+                        )
+
+                self._validate_cookies(on_complete=_after_validation)
+            except Exception as exc:
+                messagebox.showerror("Error", f"Failed to save cookies: {exc}")
+
+        CookieInputDialog(self, self.colors, on_save_cookies)
 
     def _remove_cookies(self):
         """Remove the cookies.txt file."""
         try:
             if os.path.exists(self.cookie_manager.cookie_file):
                 os.remove(self.cookie_manager.cookie_file)
+            self.cookies_validated = False
             self._update_auth_button()
             messagebox.showinfo("Cookies Removed", "The cookie file has been removed.")
         except Exception as exc:
             messagebox.showerror("Error", f"Failed to remove cookies: {exc}")
 
+    def _validate_cookies(self, show_popup_on_invalid: bool = False, on_complete: Optional[Callable[[bool], None]] = None):
+        """Validate cookies by requiring a parseable yt-dlp list-formats response."""
+        if not self.yt_dlp_available:
+            self.cookies_validation_in_progress = False
+            self.cookies_validated = False
+            self._update_auth_button()
+            if on_complete:
+                on_complete(False)
+            return
+
+        if not os.path.exists(self.cookie_manager.cookie_file):
+            self.cookies_validation_in_progress = False
+            self.cookies_validated = False
+            self._update_auth_button()
+            if on_complete:
+                on_complete(False)
+            return
+
+        self.cookies_validation_in_progress = True
+        self._update_auth_button()
+
+        def validate_in_thread():
+            """Run validation in background thread."""
+            try:
+                downloader = Downloader(cookie_manager=self.cookie_manager)
+                probe = downloader.probe_cookie_validity_with_list_formats(COOKIE_PROBE_URL)
+                validated = bool(probe.get("valid"))
+                error_message = probe.get("error") or "Cookie validation failed."
+            except Exception as exc:
+                validated = False
+                error_message = str(exc) or "Cookie validation failed."
+
+            self.after(
+                0,
+                lambda: self._on_cookies_validated(
+                    validated,
+                    show_popup_on_invalid=show_popup_on_invalid,
+                    error_message=error_message,
+                    on_complete=on_complete,
+                ),
+            )
+
+        # Run validation in background to avoid blocking UI
+        threading.Thread(target=validate_in_thread, daemon=True).start()
+
+    def _on_cookies_validated(
+        self,
+        validated: bool,
+        show_popup_on_invalid: bool = False,
+        error_message: str = "",
+        on_complete: Optional[Callable[[bool], None]] = None,
+    ):
+        """Called when cookie validation completes."""
+        self.cookies_validation_in_progress = False
+        self.cookies_validated = validated
+        self._update_auth_button()
+
+        if show_popup_on_invalid and not validated:
+            if error_message:
+                messagebox.showwarning("Cookie Validation", self._format_processing_error(error_message))
+            self.show_cookie_help()
+
+        if on_complete:
+            on_complete(validated)
+
     def _update_auth_button(self):
         """Refresh the cookie status button styling."""
-        auth_status = self.cookie_manager.get_cookie_status()
-        authenticated = auth_status["authenticated"]
-        reason = auth_status.get("reason")
-
-        if authenticated:
+        # Orange while validating, green for validated cookies, red for missing/invalid.
+        if self.cookies_validation_in_progress:
+            text = "Loading Cookies"
+            icon_name = "alert_circle"
+            fg_color = "#D97706"  # Orange
+            hover_color = "#D97706"
+            text_color = "#111827"
+            state = "disabled"
+        elif self.cookies_validated:
             text = "Cookies OK"
             icon_name = "lock"
-            fg_color = "#123225" if self.theme_manager.is_dark() else "#DFF7E6"
-            text_color = self.colors.success
-        elif auth_status.get("has_cookie_file"):
-            text = "Cookies Invalid" if reason != "expired_auth_cookies" else "Cookies Expired"
-            icon_name = "alert_circle"
-            fg_color = "#3A2C10" if self.theme_manager.is_dark() else "#FFF3D6"
-            text_color = self.colors.warning
+            fg_color = "#006400"  # Dark green
+            hover_color = "#008000"  # Green
+            text_color = "#FFFFFF"  # White text
+            state = "normal"
         else:
-            text = "Add Cookies"
-            icon_name = "cookie"
-            fg_color = "#3A2C10" if self.theme_manager.is_dark() else "#FFF3D6"
-            text_color = self.colors.warning
-
-        hover_color = self.colors.secondary_hover
+            text = "Insert Cookies"
+            icon_name = "alert_circle"
+            fg_color = "#8B0000"  # Dark red
+            hover_color = "#A52A2A"  # Brown-red
+            text_color = "#FFFFFF"  # White text
+            state = "normal"
 
         self.auth_button.configure(
             text=text,
@@ -774,8 +852,8 @@ class YoutubeGrabApp(ctk.CTk):
             fg_color=fg_color,
             hover_color=hover_color,
             text_color=text_color,
-            border_width=1,
-            border_color=self.colors.border,
+            border_width=0,
+            state=state,
         )
 
     def is_valid_youtube_url(self, url: str) -> bool:
@@ -862,7 +940,7 @@ class YoutubeGrabApp(ctk.CTk):
             messagebox.showinfo("Download Running", "Wait for the current batch to finish before adding more items.")
             return
 
-        if not self.cookie_manager.has_valid_cookies():
+        if not os.path.exists(self.cookie_manager.cookie_file):
             self.show_cookie_help()
             return
 
@@ -888,6 +966,12 @@ class YoutubeGrabApp(ctk.CTk):
         """Process URL and show the options dialog."""
         try:
             downloader = Downloader(cookie_manager=self.cookie_manager)
+            probe = downloader.probe_cookie_validity_with_list_formats(url)
+            if not probe.get("valid"):
+                error_message = probe.get("error") or "Could not list formats for this URL."
+                self.after(0, lambda msg=error_message: self._handle_queue_cookie_failure(msg))
+                return
+
             info = downloader.extract_info(url)
             self.after(0, lambda: self.show_options_dialog(url, info))
         except Exception as exc:
@@ -895,6 +979,13 @@ class YoutubeGrabApp(ctk.CTk):
             self.after(0, lambda msg=formatted_error: messagebox.showerror("Error Processing URL", msg))
         finally:
             self.after(0, lambda: self._set_fetch_busy(False))
+
+    def _handle_queue_cookie_failure(self, raw_error: str):
+        self.cookies_validated = False
+        self._update_auth_button()
+        self._set_url_feedback("Cookies look invalid. Please update them and try again.", tone="danger")
+        messagebox.showwarning("Cookie Validation", self._format_processing_error(raw_error))
+        self.show_cookie_help()
 
     def show_options_dialog(self, url: str, info: dict):
         """Show the download options dialog."""
@@ -1174,6 +1265,7 @@ class YoutubeGrabApp(ctk.CTk):
 
         history_count = len(self.download_history)
         completed_count = sum(1 for item in self.download_history if item.status == "completed")
+        failed_count = sum(1 for item in self.download_history if item.status == "failed")
         self.history_tab_button.configure(text=f"History ({history_count})")
         self.history_summary_label.configure(
             text=f"{history_count} completed or failed download{'s' if history_count != 1 else ''}"
@@ -1181,6 +1273,7 @@ class YoutubeGrabApp(ctk.CTk):
             else "Completed and failed jobs appear here during this session."
         )
         self.clear_history_button.configure(state="normal" if history_count else "disabled")
+        self.clear_failed_button.configure(state="normal" if failed_count else "disabled")
 
         if history_count == 0:
             self._render_empty_state(
@@ -1284,6 +1377,18 @@ class YoutubeGrabApp(ctk.CTk):
             return
         self.thumbnail_cache.remove_for_items(self.download_history)
         self.download_history.clear()
+        self._save_history()
+        self.update_history_display()
+
+    def clear_failed_history(self):
+        """Clear only failed downloads from history."""
+        failed_items = [item for item in self.download_history if item.status == "failed"]
+        if not failed_items:
+            return
+        if not messagebox.askyesno("Clear Failed", f"Remove {len(failed_items)} failed download{'s' if len(failed_items) != 1 else ''} from history?"):
+            return
+        self.thumbnail_cache.remove_for_items(failed_items)
+        self.download_history = [item for item in self.download_history if item.status != "failed"]
         self._save_history()
         self.update_history_display()
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import webbrowser
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -1181,3 +1182,246 @@ class ProgressDialog(ctk.CTkToplevel):
 
     def set_cancel_enabled(self, enabled: bool):
         self.cancel_button.configure(state="normal" if enabled else "disabled")
+
+
+class CookieInputDialog(ctk.CTkToplevel):
+    """Modal dialog for inputting YouTube cookies."""
+
+    def __init__(self, parent, theme_colors, on_save: Callable):
+        super().__init__(parent)
+
+        self.parent = parent
+        self.theme_colors = theme_colors
+        self.visuals = VisualAssets(theme_colors)
+        self.on_save = on_save
+
+        self.title("YouTube Authentication - Cookies")
+        self.geometry("680x680")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._center_on_parent()
+        parent.bind("<Configure>", self._on_parent_move)
+
+        self._create_ui()
+
+    def _center_on_parent(self):
+        self.update_idletasks()
+        parent_x = self.parent.winfo_x()
+        parent_y = self.parent.winfo_y()
+        parent_w = self.parent.winfo_width()
+        parent_h = self.parent.winfo_height()
+        x = parent_x + (parent_w - 680) // 2
+        y = parent_y + (parent_h - 680) // 2
+        self.geometry(f"+{x}+{y}")
+
+    def _on_parent_move(self, _event=None):
+        if self.winfo_exists():
+            self.after(10, self._center_on_parent)
+
+    def _create_ui(self):
+        # Single unified container
+        container = ctk.CTkFrame(
+            self,
+            fg_color=self.theme_colors.surface,
+            corner_radius=0
+        )
+        container.pack(fill="both", expand=True)
+
+        # Content area with padding
+        content = ctk.CTkFrame(container, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=32, pady=32)
+
+        # Title
+        ctk.CTkLabel(
+            content,
+            text="Insert YouTube Cookies",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=self.theme_colors.text_primary,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 8))
+
+        ctk.CTkLabel(
+            content,
+            text="Follow these steps to export your browser cookies:",
+            font=ctk.CTkFont(size=13),
+            text_color=self.theme_colors.text_secondary,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 24))
+
+        # Instructions
+        # Step 1 with clickable link
+        step1_frame = ctk.CTkFrame(content, fg_color="transparent")
+        step1_frame.pack(anchor="w", pady=(0, 8))
+
+        ctk.CTkLabel(
+            step1_frame,
+            text="1. Go to ",
+            font=ctk.CTkFont(size=13),
+            text_color=self.theme_colors.text_primary,
+            anchor="w",
+        ).pack(side="left")
+
+        link_button = ctk.CTkButton(
+            step1_frame,
+            text="Get cookies.txt LOCALLY",
+            font=ctk.CTkFont(size=13, underline=True),
+            text_color=self.theme_colors.primary,
+            fg_color="transparent",
+            hover_color=self.theme_colors.surface_alt,
+            width=0,
+            height=0,
+            command=lambda: self._open_url("https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"),
+        )
+        link_button.pack(side="left")
+
+        ctk.CTkLabel(
+            step1_frame,
+            text=" for your browser",
+            font=ctk.CTkFont(size=13),
+            text_color=self.theme_colors.text_primary,
+            anchor="w",
+        ).pack(side="left")
+
+        # Steps 2-4
+        steps = [
+            "2. Open youtube.com",
+            "3. Open the extension",
+            "4. Copy and paste the cookies here:"
+        ]
+
+        for step in steps:
+            ctk.CTkLabel(
+                content,
+                text=step,
+                font=ctk.CTkFont(size=13),
+                text_color=self.theme_colors.text_primary,
+                anchor="w",
+            ).pack(anchor="w", pady=(0, 8))
+
+        # Text box label and action buttons row
+        textbox_header = ctk.CTkFrame(content, fg_color="transparent")
+        textbox_header.pack(fill="x", pady=(16, 8))
+
+        ctk.CTkLabel(
+            textbox_header,
+            text="Paste cookies below:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.theme_colors.text_muted,
+            anchor="w",
+        ).pack(side="left")
+
+        # Action buttons for the textbox (Clear/Paste)
+        textbox_actions = ctk.CTkFrame(textbox_header, fg_color="transparent")
+        textbox_actions.pack(side="right")
+
+        self.cookie_action_button = ctk.CTkButton(
+            textbox_actions,
+            text="Paste",
+            image=self.visuals.icon("paste", 14, self.theme_colors.text_secondary),
+            compound="left",
+            width=76,
+            height=28,
+            corner_radius=10,
+            fg_color=self.theme_colors.surface_alt,
+            hover_color=self.theme_colors.secondary_hover,
+            text_color=self.theme_colors.text_secondary,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._paste_cookies,
+        )
+        self.cookie_action_button.pack(side="left")
+
+        self.cookie_textbox = ctk.CTkTextbox(
+            content,
+            font=ctk.CTkFont(size=10, family="Courier"),
+            fg_color=self.theme_colors.input_bg,
+            text_color=self.theme_colors.text_primary,
+            border_width=2,
+            border_color=self.theme_colors.border,
+            wrap="none",
+            height=200,
+        )
+        self.cookie_textbox.pack(fill="both", expand=True, pady=(0, 24))
+        self.cookie_textbox.bind("<KeyRelease>", lambda _event: self._sync_cookie_action_button())
+
+        # Buttons
+        button_frame = ctk.CTkFrame(content, fg_color="transparent")
+        button_frame.pack(fill="x")
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+
+        cancel_button = ctk.CTkButton(
+            button_frame,
+            text="Cancel",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=self.theme_colors.surface_alt,
+            hover_color=self.theme_colors.secondary_hover,
+            text_color=self.theme_colors.text_secondary,
+            height=48,
+            corner_radius=12,
+            border_width=1,
+            border_color=self.theme_colors.border,
+            command=self._on_cancel,
+        )
+        cancel_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        save_button = ctk.CTkButton(
+            button_frame,
+            text="Save Cookies",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=self.theme_colors.primary,
+            hover_color=self.theme_colors.primary_hover,
+            text_color="#FFFFFF",
+            height=48,
+            corner_radius=12,
+            command=self._on_save_click,
+        )
+        save_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+    def _open_url(self, url: str):
+        webbrowser.open(url)
+
+    def _paste_cookies(self):
+        """Paste clipboard content into the cookie textbox."""
+        try:
+            clipboard_content = self.clipboard_get()
+        except Exception:
+            clipboard_content = ""
+
+        if clipboard_content:
+            self.cookie_textbox.delete("1.0", "end")
+            self.cookie_textbox.insert("1.0", clipboard_content)
+            self._sync_cookie_action_button()
+
+    def _clear_cookies(self):
+        """Clear the cookie textbox."""
+        self.cookie_textbox.delete("1.0", "end")
+        self._sync_cookie_action_button()
+
+    def _sync_cookie_action_button(self):
+        """Update the action button based on textbox content."""
+        has_text = bool(self.cookie_textbox.get("1.0", "end-1c").strip())
+        if has_text:
+            self.cookie_action_button.configure(
+                text="Clear",
+                image=self.visuals.icon("close", 13, self.theme_colors.text_secondary),
+                command=self._clear_cookies,
+            )
+        else:
+            self.cookie_action_button.configure(
+                text="Paste",
+                image=self.visuals.icon("paste", 14, self.theme_colors.text_secondary),
+                command=self._paste_cookies,
+            )
+
+    def _on_cancel(self):
+        self.destroy()
+
+    def _on_save_click(self):
+        cookie_content = self.cookie_textbox.get("1.0", "end-1c").strip()
+        if cookie_content:
+            self.on_save(cookie_content)
+            self.destroy()
+        else:
+            messagebox.showwarning("No Cookies", "Please paste your cookies before saving.")

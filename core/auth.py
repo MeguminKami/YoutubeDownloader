@@ -4,6 +4,7 @@ YouTube Authentication via cookies.txt
 This module manages a local cookies.txt file for YouTube authentication.
 """
 import os
+import subprocess
 import time
 from typing import Optional
 
@@ -80,8 +81,8 @@ class CookieManager:
         return rows
 
     def get_cookie_file_path(self) -> Optional[str]:
-        """Get path to cookies.txt if it exists and is valid."""
-        if self.has_valid_cookies():
+        """Get path to cookies.txt if the file exists."""
+        if os.path.exists(self.cookie_file):
             return self.cookie_file
         return None
 
@@ -152,5 +153,38 @@ class CookieManager:
             opts['cookiefile'] = cookie_file
 
         return opts
+
+    def validate_cookies_with_ytdlp(self) -> bool:
+        """
+        Validate cookies by making a test yt-dlp request.
+
+        Returns:
+            True if cookies work, False otherwise
+        """
+        if not os.path.exists(self.cookie_file):
+            return False
+
+        try:
+            # Make a simple test request to YouTube
+            cmd = [
+                'yt-dlp',
+                '--cookies', self.cookie_file,
+                '--skip-download',
+                '--quiet',
+                '--no-warnings',
+                'https://www.youtube.com/watch?v=dQw4w9WgXcQ'  # Short test video
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # If the command succeeds without errors, cookies are valid
+            return result.returncode == 0
+        except Exception:
+            return False
 
 
