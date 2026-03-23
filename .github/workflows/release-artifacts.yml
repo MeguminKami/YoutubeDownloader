@@ -22,6 +22,7 @@ jobs:
           - os: windows-latest
             platform: windows
             verify_path: dist/YoutubeGrab.exe
+            verify_debug_path: dist/YoutubeGrabDev.exe
             package_path: dist/YoutubeGrab.exe
             package_type: file
             archive_ext: zip
@@ -184,6 +185,10 @@ jobs:
             throw "Onefile executable was not produced."
           }
 
+          if (!(Test-Path 'dist/YoutubeGrabDev.exe')) {
+            throw "Debug onefile executable was not produced."
+          }
+
           Write-Host "Validated onefile packaging inputs and output executable."
 
       - name: Build executable with PyInstaller (macOS/Linux)
@@ -225,6 +230,19 @@ jobs:
             $bytes = [System.IO.File]::ReadAllBytes($artifactPath)
             if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
               throw "Windows executable does not have MZ header: $artifactPath"
+            }
+
+            $debugExePath = "${{ matrix.verify_debug_path }}"
+            if (!(Test-Path $debugExePath)) {
+              throw "Expected debug build output not found: $debugExePath"
+            }
+            $debugItem = Get-Item $debugExePath
+            if ($debugItem.Length -le 0) {
+              throw "Debug executable is empty: $debugExePath"
+            }
+            $debugBytes = [System.IO.File]::ReadAllBytes($debugExePath)
+            if ($debugBytes.Length -lt 2 -or $debugBytes[0] -ne 0x4D -or $debugBytes[1] -ne 0x5A) {
+              throw "Windows debug executable does not have MZ header: $debugExePath"
             }
           }
 
@@ -268,7 +286,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = "${{ matrix.verify_path }}"
+          $exe = "${{ matrix.verify_debug_path }}"
           $process = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 5
           if ($process.HasExited -and $process.ExitCode -ne 0) {
@@ -321,6 +339,9 @@ jobs:
             Copy-Item "${{ matrix.package_path }}" $stagingDir -Recurse
           } else {
             Copy-Item "${{ matrix.package_path }}" $stagingDir
+            if ($env:RUNNER_OS -eq 'Windows') {
+              Copy-Item "${{ matrix.verify_debug_path }}" $stagingDir
+            }
           }
 
           $archivePath = Join-Path $assetRoot "$artifactBase.${{ matrix.archive_ext }}"
