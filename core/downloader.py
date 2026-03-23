@@ -288,12 +288,16 @@ class Downloader:
         except Exception as exc:
             return {'video_formats': [], 'error': str(exc)}
 
-    def _build_list_formats_command(self, url: str) -> List[str]:
-        command = self._yt_dlp_base_command() + [
+    def _build_list_formats_command(self, url: str, enable_remote_components: bool = True) -> List[str]:
+        command = self._yt_dlp_base_command()
+        if enable_remote_components:
+            command += ['--remote-components', 'ejs:github']
+        command += [
             '--list-formats',
-            '--remote-components', 'ejs:github',
+            '--no-warnings',
             url,
         ]
+
 
         if self.cookie_manager:
             cookie_file = self.cookie_manager.get_cookie_file_path()
@@ -303,10 +307,23 @@ class Downloader:
         return command
 
     def _run_list_formats(self, url: str, timeout: int = 120) -> subprocess.CompletedProcess:
-        command = self._build_list_formats_command(url)
+        command = self._build_list_formats_command(url, enable_remote_components=True)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        return subprocess.run(
+        first = subprocess.run(
             command,
+            capture_output=True,
+            creationflags=creationflags,
+            timeout=timeout,
+            **SUBPROCESS_TEXT_KWARGS,
+        )
+
+        if first.returncode == 0:
+            return first
+
+        # Fallback: some environments block GitHub remote components.
+        fallback_command = self._build_list_formats_command(url, enable_remote_components=False)
+        return subprocess.run(
+            fallback_command,
             capture_output=True,
             creationflags=creationflags,
             timeout=timeout,

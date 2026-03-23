@@ -970,7 +970,8 @@ class YoutubeGrabApp(ctk.CTk):
             probe = downloader.probe_cookie_validity_with_list_formats(url)
             if not probe.get("valid"):
                 error_message = probe.get("error") or "Could not list formats for this URL."
-                self.after(0, lambda msg=error_message: self._handle_queue_cookie_failure(msg))
+                error_code = probe.get("error_code") or "format_discovery_failed"
+                self.after(0, lambda msg=error_message, code=error_code: self._handle_queue_probe_failure(msg, code))
                 return
 
             info = downloader.extract_info(url)
@@ -981,12 +982,17 @@ class YoutubeGrabApp(ctk.CTk):
         finally:
             self.after(0, lambda: self._set_fetch_busy(False))
 
-    def _handle_queue_cookie_failure(self, raw_error: str):
-        self.cookies_validated = False
-        self._update_auth_button()
-        self._set_url_feedback("Cookies look invalid. Please update them and try again.", tone="danger")
-        messagebox.showwarning("Cookie Validation", self._format_processing_error(raw_error))
-        self.show_cookie_help()
+    def _handle_queue_probe_failure(self, raw_error: str, error_code: str):
+        if error_code == "invalid_cookies":
+            self.cookies_validated = False
+            self._update_auth_button()
+            self._set_url_feedback("Cookies look invalid. Please update them and try again.", tone="danger")
+            messagebox.showwarning("Cookie Validation", self._format_processing_error(raw_error))
+            self.show_cookie_help()
+            return
+
+        self._set_url_feedback("yt-dlp failed to fetch formats for this URL.", tone="danger")
+        messagebox.showwarning("Format Discovery", self._format_processing_error(raw_error))
 
     def show_options_dialog(self, url: str, info: dict):
         """Show the download options dialog."""
