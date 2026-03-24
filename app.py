@@ -781,13 +781,24 @@ class YoutubeGrabApp(ctk.CTk):
         def validate_in_thread():
             """Run validation in background thread."""
             try:
+                # Log diagnostic info in frozen mode for debugging
+                if is_frozen_runtime():
+                    from core.deps import get_runtime_diagnostics
+                    import logging
+                    diagnostics = get_runtime_diagnostics()
+                    logging.debug(f"[cookie_validation] Runtime diagnostics: {diagnostics}")
+
                 downloader = Downloader(cookie_manager=self.cookie_manager)
                 probe = downloader.probe_cookie_validity_with_list_formats(COOKIE_PROBE_URL)
                 validated = bool(probe.get("valid"))
                 error_message = probe.get("error") or "Cookie validation failed."
+            except RuntimeError as exc:
+                # RuntimeError contains user-friendly messages from our code
+                validated = False
+                error_message = str(exc)
             except Exception as exc:
                 validated = False
-                error_message = str(exc) or "Cookie validation failed."
+                error_message = f"Unexpected error during validation: {type(exc).__name__}: {exc}"
 
             self.after(
                 0,

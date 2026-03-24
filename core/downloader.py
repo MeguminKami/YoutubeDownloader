@@ -309,26 +309,52 @@ class Downloader:
     def _run_list_formats(self, url: str, timeout: int = 120) -> subprocess.CompletedProcess:
         command = self._build_list_formats_command(url, enable_remote_components=True)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        first = subprocess.run(
-            command,
-            capture_output=True,
-            creationflags=creationflags,
-            timeout=timeout,
-            **SUBPROCESS_TEXT_KWARGS,
-        )
+
+        # Debug: log the command being executed (helpful for diagnosing frozen build issues)
+        import logging
+        logging.debug(f"[yt-dlp] Running command: {' '.join(command)}")
+
+        # In frozen builds without a console, we need to explicitly handle stdin
+        # to prevent potential issues with subprocess blocking on stdin
+        stdin_pipe = subprocess.DEVNULL if is_frozen_runtime() else None
+
+        try:
+            first = subprocess.run(
+                command,
+                capture_output=True,
+                stdin=stdin_pipe,
+                creationflags=creationflags,
+                timeout=timeout,
+                **SUBPROCESS_TEXT_KWARGS,
+            )
+        except FileNotFoundError as e:
+            logging.error(f"[yt-dlp] Binary not found: {e}")
+            raise RuntimeError(f"yt-dlp binary not found at: {command[0]}. Please reinstall the application.")
+        except OSError as e:
+            logging.error(f"[yt-dlp] OS error running command: {e}")
+            raise RuntimeError(f"Failed to run yt-dlp: {e}")
 
         if first.returncode == 0:
             return first
 
+        # Log first attempt failure for debugging
+        logging.debug(f"[yt-dlp] First attempt failed (code {first.returncode}): {first.stderr[:500] if first.stderr else 'no stderr'}")
+
         # Fallback: some environments block GitHub remote components.
         fallback_command = self._build_list_formats_command(url, enable_remote_components=False)
-        return subprocess.run(
-            fallback_command,
-            capture_output=True,
-            creationflags=creationflags,
-            timeout=timeout,
-            **SUBPROCESS_TEXT_KWARGS,
-        )
+        try:
+            return subprocess.run(
+                fallback_command,
+                capture_output=True,
+                stdin=stdin_pipe,
+                creationflags=creationflags,
+                timeout=timeout,
+                **SUBPROCESS_TEXT_KWARGS,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(f"yt-dlp binary not found at: {fallback_command[0]}. Please reinstall the application.")
+        except OSError as e:
+            raise RuntimeError(f"Failed to run yt-dlp: {e}")
 
     def _is_cookie_auth_failure(self, output: str) -> bool:
         lower = (output or '').lower()
@@ -767,8 +793,11 @@ class Downloader:
         cmd.append(item.url)
 
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        # In frozen builds without a console, we need to explicitly set stdin to DEVNULL
+        stdin_pipe = subprocess.DEVNULL if is_frozen_runtime() else None
         process = subprocess.Popen(
             cmd,
+            stdin=stdin_pipe,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
@@ -940,9 +969,11 @@ def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
         ]
 
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        stdin_pipe = subprocess.DEVNULL if is_frozen_runtime() else None
         result = subprocess.run(
             ffmpeg_cmd,
             capture_output=True,
+            stdin=stdin_pipe,
             creationflags=creationflags,
             timeout=3600,
             **SUBPROCESS_TEXT_KWARGS,
@@ -963,6 +994,7 @@ def merge_playlist_files(temp_folder: str, output_file: str, ext: str) -> bool:
             result = subprocess.run(
                 ffmpeg_cmd,
                 capture_output=True,
+                stdin=stdin_pipe,
                 creationflags=creationflags,
                 timeout=7200,
                 **SUBPROCESS_TEXT_KWARGS,

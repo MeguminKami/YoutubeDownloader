@@ -87,6 +87,40 @@ def check_yt_dlp() -> bool:
     except ImportError:
         return False
 
+
+def get_runtime_diagnostics() -> dict:
+    """
+    Return diagnostic information about the runtime environment.
+    Useful for debugging frozen build issues.
+    """
+    import logging
+
+    diagnostics = {
+        'frozen': is_frozen_runtime(),
+        'platform': sys.platform,
+        'executable': sys.executable,
+    }
+
+    if is_frozen_runtime():
+        meipass = getattr(sys, '_MEIPASS', None)
+        diagnostics['meipass'] = meipass
+        diagnostics['search_dirs'] = _runtime_search_dirs()
+
+        # Check bundled binaries
+        for tool in ['yt-dlp', 'ffmpeg', 'ffprobe']:
+            path = find_bundled_binary(tool)
+            diagnostics[f'{tool}_path'] = path
+            if path:
+                diagnostics[f'{tool}_exists'] = os.path.isfile(path)
+                diagnostics[f'{tool}_executable'] = os.access(path, os.X_OK) if path else False
+
+        logging.debug(f"[diagnostics] Frozen runtime: {diagnostics}")
+    else:
+        diagnostics['yt_dlp_which'] = shutil.which('yt-dlp')
+        diagnostics['ffmpeg_which'] = shutil.which('ffmpeg')
+
+    return diagnostics
+
 def install_yt_dlp(progress_callback: Optional[Callable[[str], None]] = None) -> tuple[bool, str]:
     """
     Install yt-dlp using pip

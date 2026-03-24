@@ -227,13 +227,20 @@ class CookieManager:
 
             # Prefer bundled/runtime-resolved yt-dlp in packaged builds.
             from core.downloader import resolve_runtime_tool
+            from core.deps import is_frozen_runtime
             resolved = resolve_runtime_tool('yt-dlp', allow_python_module_fallback=True)
             if resolved:
                 cmd = resolved + cmd[1:]
 
+            # In frozen builds without a console, we need to explicitly set stdin to DEVNULL
+            stdin_pipe = subprocess.DEVNULL if is_frozen_runtime() else None
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
+                stdin=stdin_pipe,
+                creationflags=creationflags,
                 text=True,
                 timeout=10
             )
