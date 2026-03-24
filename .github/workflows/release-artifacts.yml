@@ -189,6 +189,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # Debug: verify environment variables are set
+          Write-Host "Verifying environment variables before PyInstaller..."
+          Write-Host "YTDLP_EXE: $env:YTDLP_EXE"
+          Write-Host "FFMPEG_EXE: $env:FFMPEG_EXE"
+          Write-Host "FFPROBE_EXE: $env:FFPROBE_EXE"
+
+          if (-not $env:YTDLP_EXE -or !(Test-Path $env:YTDLP_EXE)) {
+            throw "YTDLP_EXE not set or file not found before PyInstaller build"
+          }
+
+          # Run PyInstaller
           python -m PyInstaller --noconfirm --clean YoutubeGrab.spec
 
       - name: Validate onefile packaging inputs (Windows)

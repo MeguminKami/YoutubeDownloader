@@ -51,6 +51,9 @@ def _windows_runtime_binary(name: str) -> str:
     env_var = f"{name.upper().replace('-', '')}_EXE"
     env_candidate = os.environ.get(env_var)
 
+    # Debug output for CI troubleshooting
+    print(f"[spec] Looking for {name}: env_var={env_var}, env_value={env_candidate}")
+
     scripts_dir = sysconfig.get_path('scripts')
     candidates = [
         env_candidate,
@@ -58,10 +61,15 @@ def _windows_runtime_binary(name: str) -> str:
         shutil.which(f'{name}.exe'),
         shutil.which(name),
     ]
+
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
+            print(f"[spec] Found {name} at: {candidate}")
             return candidate
-    raise SystemExit(f"Missing required Windows runtime tool for packaging: {name}.exe")
+        elif candidate:
+            print(f"[spec] Candidate {candidate} does not exist")
+
+    raise SystemExit(f"Missing required Windows runtime tool for packaging: {name}.exe (checked env var {env_var}={env_candidate})")
 
 
 windows_binaries = []
