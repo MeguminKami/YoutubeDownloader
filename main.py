@@ -30,7 +30,12 @@ def _print_startup_diagnostics():
         for binary in ['yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe']:
             path = os.path.join(meipass, binary)
             exists = os.path.isfile(path)
-            print(f"  {binary}: {'EXISTS' if exists else 'NOT FOUND'} at {path}")
+            size_mb = os.path.getsize(path) / (1024 * 1024) if exists else 0
+            status = f"EXISTS ({size_mb:.1f} MB)" if exists else "NOT FOUND"
+            print(f"  {binary}: {status}")
+            # yt-dlp standalone is ~15MB+, pip wrapper is ~100KB
+            if binary == 'yt-dlp.exe' and exists and size_mb < 1:
+                print(f"    WARNING: yt-dlp.exe is very small ({size_mb:.2f} MB) - likely pip wrapper, not standalone!")
     print("=" * 60)
 
 

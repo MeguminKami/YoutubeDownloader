@@ -315,6 +315,22 @@ class Downloader:
             print(f"[DEBUG] yt-dlp command: {command}")
             print(f"[DEBUG] Binary exists: {os.path.isfile(command[0]) if command else 'N/A'}")
 
+            # Test yt-dlp --version first to verify the binary works
+            try:
+                version_result = subprocess.run(
+                    [command[0], '--version'],
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                    timeout=10,
+                    **SUBPROCESS_TEXT_KWARGS,
+                )
+                print(f"[DEBUG] yt-dlp --version returncode: {version_result.returncode}")
+                print(f"[DEBUG] yt-dlp --version stdout: {version_result.stdout.strip() if version_result.stdout else 'empty'}")
+                print(f"[DEBUG] yt-dlp --version stderr: {version_result.stderr.strip() if version_result.stderr else 'empty'}")
+            except Exception as e:
+                print(f"[DEBUG] yt-dlp --version failed: {type(e).__name__}: {e}")
+
         # In frozen builds without a console, we need to explicitly handle stdin
         # to prevent potential issues with subprocess blocking on stdin
         stdin_pipe = subprocess.DEVNULL if is_frozen_runtime() else None
