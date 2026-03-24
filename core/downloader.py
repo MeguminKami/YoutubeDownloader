@@ -310,9 +310,10 @@ class Downloader:
         command = self._build_list_formats_command(url, enable_remote_components=True)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
-        # Debug: log the command being executed (helpful for diagnosing frozen build issues)
-        import logging
-        logging.debug(f"[yt-dlp] Running command: {' '.join(command)}")
+        # Debug: print command info for troubleshooting frozen build issues
+        if is_frozen_runtime():
+            print(f"[DEBUG] yt-dlp command: {command}")
+            print(f"[DEBUG] Binary exists: {os.path.isfile(command[0]) if command else 'N/A'}")
 
         # In frozen builds without a console, we need to explicitly handle stdin
         # to prevent potential issues with subprocess blocking on stdin
@@ -327,23 +328,26 @@ class Downloader:
                 timeout=timeout,
                 **SUBPROCESS_TEXT_KWARGS,
             )
+            if is_frozen_runtime():
+                print(f"[DEBUG] First attempt returncode: {first.returncode}")
+                print(f"[DEBUG] stdout: {first.stdout[:500] if first.stdout else 'empty'}")
+                print(f"[DEBUG] stderr: {first.stderr[:500] if first.stderr else 'empty'}")
         except FileNotFoundError as e:
-            logging.error(f"[yt-dlp] Binary not found: {e}")
+            print(f"[DEBUG] FileNotFoundError: {e}")
             raise RuntimeError(f"yt-dlp binary not found at: {command[0]}. Please reinstall the application.")
         except OSError as e:
-            logging.error(f"[yt-dlp] OS error running command: {e}")
+            print(f"[DEBUG] OSError: {e}")
             raise RuntimeError(f"Failed to run yt-dlp: {e}")
 
         if first.returncode == 0:
             return first
 
-        # Log first attempt failure for debugging
-        logging.debug(f"[yt-dlp] First attempt failed (code {first.returncode}): {first.stderr[:500] if first.stderr else 'no stderr'}")
-
         # Fallback: some environments block GitHub remote components.
         fallback_command = self._build_list_formats_command(url, enable_remote_components=False)
+        if is_frozen_runtime():
+            print(f"[DEBUG] Fallback command: {fallback_command}")
         try:
-            return subprocess.run(
+            second = subprocess.run(
                 fallback_command,
                 capture_output=True,
                 stdin=stdin_pipe,
@@ -351,6 +355,11 @@ class Downloader:
                 timeout=timeout,
                 **SUBPROCESS_TEXT_KWARGS,
             )
+            if is_frozen_runtime():
+                print(f"[DEBUG] Fallback returncode: {second.returncode}")
+                print(f"[DEBUG] stdout: {second.stdout[:500] if second.stdout else 'empty'}")
+                print(f"[DEBUG] stderr: {second.stderr[:500] if second.stderr else 'empty'}")
+            return second
         except FileNotFoundError as e:
             raise RuntimeError(f"yt-dlp binary not found at: {fallback_command[0]}. Please reinstall the application.")
         except OSError as e:
@@ -368,17 +377,34 @@ class Downloader:
         if not self._is_valid_url(url):
             return {'valid': False, 'all_formats': [], 'error': 'Invalid URL', 'error_code': 'invalid_url'}
 
+        # Add diagnostic info for frozen builds
+        import logging
+        if is_frozen_runtime():
+            from core.deps import get_runtime_diagnostics
+            diag = get_runtime_diagnostics()
+            logging.debug(f"[probe] Runtime diagnostics: {diag}")
+            yt_dlp_path = diag.get('yt-dlp_path')
+            if not yt_dlp_path or not diag.get('yt-dlp_exists'):
+                return {
+                    'valid': False,
+                    'all_formats': [],
+                    'error': f"yt-dlp binary not found. Expected at: {yt_dlp_path or 'unknown'}. Search dirs: {diag.get('search_dirs')}",
+                    'error_code': 'binary_not_found'
+                }
+
         try:
             result = self._run_list_formats(url)
         except subprocess.TimeoutExpired:
             return {'valid': False, 'all_formats': [], 'error': 'Timed out while fetching formats', 'error_code': 'format_discovery_failed'}
         except Exception as exc:
-            return {'valid': False, 'all_formats': [], 'error': str(exc), 'error_code': 'format_discovery_failed'}
+            return {'valid': False, 'all_formats': [], 'error': f"Exception running yt-dlp: {type(exc).__name__}: {exc}", 'error_code': 'format_discovery_failed'}
 
         output = f"{result.stdout}\n{result.stderr}".strip()
         if result.returncode != 0:
             error_code = 'invalid_cookies' if self._is_cookie_auth_failure(output) else 'format_discovery_failed'
-            return {'valid': False, 'all_formats': [], 'error': output or 'yt-dlp failed to list formats', 'error_code': error_code}
+            # Include return code and command info in error for debugging
+            cmd_info = f"(exit code: {result.returncode})"
+            return {'valid': False, 'all_formats': [], 'error': f"{cmd_info} {output}" if output else f'{cmd_info} yt-dlp failed to list formats', 'error_code': error_code}
 
         all_formats = self.parse_list_formats_output(result.stdout)
         if not all_formats:
