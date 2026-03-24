@@ -124,43 +124,88 @@ jobs:
         shell: pwsh
         run: |
           choco install ffmpeg -y --no-progress
-          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-          $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
-          $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
-          if (-not $ffmpeg -or -not $ffprobe) {
-            throw "FFmpeg installation completed, but ffmpeg/ffprobe are not available on PATH."
+          # Chocolatey installs actual binaries in lib directory, not just the shims in bin
+          # The shims in C:\ProgramData\chocolatey\bin are tiny wrappers - we need the real binaries
+          $ffmpegLibPath = "C:\ProgramData\chocolatey\lib\ffmpeg"
+
+          if (!(Test-Path $ffmpegLibPath)) {
+            throw "FFmpeg lib directory not found after chocolatey install"
           }
 
-          Write-Host "ffmpeg: $($ffmpeg.Source)"
-          Write-Host "ffprobe: $($ffprobe.Source)"
+          # Find the actual ffmpeg.exe (not the shim)
+          $ffmpegExe = Get-ChildItem $ffmpegLibPath -Recurse -Filter "ffmpeg.exe" |
+                       Where-Object { $_.Length -gt 10MB } |
+                       Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $ffmpegExe) {
+            throw "Could not find actual ffmpeg.exe binary (>10MB) in chocolatey lib directory"
+          }
+
+          $ffprobeExe = Join-Path (Split-Path $ffmpegExe -Parent) "ffprobe.exe"
+
+          if (!(Test-Path $ffprobeExe)) {
+            throw "ffprobe.exe not found alongside ffmpeg.exe at: $ffprobeExe"
+          }
+
+          # Verify file sizes
+          $ffmpegSize = (Get-Item $ffmpegExe).Length
+          $ffprobeSize = (Get-Item $ffprobeExe).Length
+
+          Write-Host "Found FFmpeg binaries:"
+          Write-Host "  ffmpeg.exe: $ffmpegExe ($([math]::Round($ffmpegSize / 1MB, 2)) MB)"
+          Write-Host "  ffprobe.exe: $ffprobeExe ($([math]::Round($ffprobeSize / 1MB, 2)) MB)"
+
+          if ($ffmpegSize -lt 10MB -or $ffprobeSize -lt 10MB) {
+            throw "FFmpeg binaries are too small - found shims instead of real binaries"
+          }
+
+          # Set environment variables for next steps
+          "FFMPEG_EXE=$ffmpegExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFPROBE_EXE=$ffprobeExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Resolve Windows runtime tool inputs
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # YTDLP_EXE is already set by the standalone download step
+          # Verify YTDLP_EXE is set by the standalone download step
           if (-not $env:YTDLP_EXE -or !(Test-Path $env:YTDLP_EXE)) {
             throw "YTDLP_EXE not set or file not found. The standalone yt-dlp download step may have failed."
           }
 
-          $ffmpegPath = Get-Command ffmpeg -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue
-          $ffprobePath = Get-Command ffprobe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue
-
-          if (-not $ffmpegPath) {
-            throw "Could not locate ffmpeg executable after dependency install."
+          # Verify FFMPEG_EXE and FFPROBE_EXE are set by the FFmpeg install step
+          if (-not $env:FFMPEG_EXE -or !(Test-Path $env:FFMPEG_EXE)) {
+            throw "FFMPEG_EXE not set or file not found. The FFmpeg install step may have failed."
           }
-          if (-not $ffprobePath) {
-            throw "Could not locate ffprobe executable after dependency install."
+          if (-not $env:FFPROBE_EXE -or !(Test-Path $env:FFPROBE_EXE)) {
+            throw "FFPROBE_EXE not set or file not found. The FFmpeg install step may have failed."
           }
 
-          "FFMPEG_EXE=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "FFPROBE_EXE=$ffprobePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Verify all binaries are valid Windows executables with proper sizes
+          $binaries = @(
+            @{Name="yt-dlp"; Path=$env:YTDLP_EXE; MinSize=8MB},
+            @{Name="ffmpeg"; Path=$env:FFMPEG_EXE; MinSize=50MB},
+            @{Name="ffprobe"; Path=$env:FFPROBE_EXE; MinSize=50MB}
+          )
 
           Write-Host "Runtime tools for packaging:"
-          Write-Host "  YTDLP_EXE: $env:YTDLP_EXE"
-          Write-Host "  FFMPEG_EXE: $ffmpegPath"
-          Write-Host "  FFPROBE_EXE: $ffprobePath"
+          foreach ($binary in $binaries) {
+            $size = (Get-Item $binary.Path).Length
+            Write-Host "  $($binary.Name): $($binary.Path)"
+            Write-Host "    Size: $([math]::Round($size / 1MB, 2)) MB"
+
+            if ($size -lt $binary.MinSize) {
+              throw "$($binary.Name) size $([math]::Round($size / 1MB, 2)) MB is too small (min $([math]::Round($binary.MinSize / 1MB, 2)) MB)"
+            }
+
+            # Verify MZ header
+            $bytes = [System.IO.File]::ReadAllBytes($binary.Path)
+            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "$($binary.Name) is not a valid Windows executable"
+            }
+          }
+
+          Write-Host "`nAll runtime tools validated and ready for packaging."
 
       - name: Ensure Windows executable icon asset
         if: runner.os == 'Windows'
@@ -195,18 +240,52 @@ jobs:
           Write-Host "FFMPEG_EXE: $env:FFMPEG_EXE"
           Write-Host "FFPROBE_EXE: $env:FFPROBE_EXE"
 
-          if (-not $env:YTDLP_EXE -or !(Test-Path $env:YTDLP_EXE)) {
-            throw "YTDLP_EXE not set or file not found before PyInstaller build"
+          # Verify all required binaries exist and are valid
+          $requiredBinaries = @(
+            @{Name="yt-dlp"; Path=$env:YTDLP_EXE; MinSize=8MB},
+            @{Name="ffmpeg"; Path=$env:FFMPEG_EXE; MinSize=10MB},
+            @{Name="ffprobe"; Path=$env:FFPROBE_EXE; MinSize=10MB}
+          )
+
+          foreach ($binary in $requiredBinaries) {
+            if (-not $binary.Path) {
+              throw "$($binary.Name): Environment variable not set"
+            }
+            if (!(Test-Path $binary.Path)) {
+              throw "$($binary.Name): File not found at $($binary.Path)"
+            }
+            $size = (Get-Item $binary.Path).Length
+            Write-Host "$($binary.Name): $([math]::Round($size / 1MB, 2)) MB"
+            if ($size -lt $binary.MinSize) {
+              throw "$($binary.Name): File size $([math]::Round($size / 1MB, 2)) MB is too small (minimum $([math]::Round($binary.MinSize / 1MB, 2)) MB)"
+            }
+
+            # Verify it's a valid Windows executable (MZ header)
+            $bytes = [System.IO.File]::ReadAllBytes($binary.Path)
+            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "$($binary.Name): Not a valid Windows executable (missing MZ header)"
+            }
           }
 
-          # Run PyInstaller
+          Write-Host "`nAll binaries validated. Running PyInstaller..."
+
+          # Run PyInstaller with explicit environment variable display
+          $env:PSModulePath = "" # Avoid potential PATH pollution
           python -m PyInstaller --noconfirm --clean YoutubeGrab.spec
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller failed with exit code $LASTEXITCODE"
+          }
+
+          Write-Host "PyInstaller build completed successfully"
 
       - name: Validate onefile packaging inputs (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          Write-Host "Validating input binaries..."
           $requiredTools = @($env:YTDLP_EXE, $env:FFMPEG_EXE, $env:FFPROBE_EXE)
+          $totalInputSize = 0
 
           foreach ($toolPath in $requiredTools) {
             if (-not $toolPath -or !(Test-Path $toolPath)) {
@@ -220,7 +299,11 @@ jobs:
             if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
               throw "Runtime tool input is not a valid Windows executable: $toolPath"
             }
+            Write-Host "  $(Split-Path -Leaf $toolPath): $([math]::Round($item.Length / 1MB, 2)) MB"
+            $totalInputSize += $item.Length
           }
+
+          Write-Host "`nTotal input binaries size: $([math]::Round($totalInputSize / 1MB, 2)) MB"
 
           if (!(Test-Path 'dist/YoutubeGrab.exe')) {
             throw "Onefile executable was not produced."
@@ -230,7 +313,21 @@ jobs:
             throw "Debug onefile executable was not produced."
           }
 
-          Write-Host "Validated onefile packaging inputs and output executable."
+          $mainExe = Get-Item 'dist/YoutubeGrab.exe'
+          $devExe = Get-Item 'dist/YoutubeGrabDev.exe'
+
+          Write-Host "`nOutput executables:"
+          Write-Host "  YoutubeGrab.exe: $([math]::Round($mainExe.Length / 1MB, 2)) MB"
+          Write-Host "  YoutubeGrabDev.exe: $([math]::Round($devExe.Length / 1MB, 2)) MB"
+
+          # The output exe should be at least as large as the input binaries
+          # (actually it should be larger due to Python runtime, but let's check minimum)
+          $minExpectedSize = $totalInputSize * 0.8  # Allow some compression
+          if ($mainExe.Length -lt $minExpectedSize) {
+            throw "YoutubeGrab.exe size $([math]::Round($mainExe.Length / 1MB, 2)) MB is suspiciously small. Expected at least $([math]::Round($minExpectedSize / 1MB, 2)) MB based on input binaries. Binaries may not be packaged correctly."
+          }
+
+          Write-Host "`nValidated onefile packaging inputs and output executables."
 
       - name: Build executable with PyInstaller (macOS/Linux)
         if: runner.os != 'Windows'
