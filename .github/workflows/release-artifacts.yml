@@ -80,9 +80,40 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          # Update this line to control the bundled yt-dlp version shipped in release artifacts.
-          python -m pip install -U --pre "yt-dlp[default]"
+          # Install yt_dlp Python module for hiddenimports (not for the binary)
+          python -m pip install yt-dlp
           python -m pip install pyinstaller
+
+      - name: Download standalone yt-dlp binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Download the standalone yt-dlp.exe binary (not the pip wrapper)
+          # This is required because pip-installed yt-dlp.exe is just a Python wrapper
+          # that won't work inside a frozen PyInstaller bundle
+          $ytDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+          $ytDlpPath = "yt-dlp-standalone.exe"
+
+          Write-Host "Downloading standalone yt-dlp.exe from $ytDlpUrl"
+          Invoke-WebRequest -Uri $ytDlpUrl -OutFile $ytDlpPath -UseBasicParsing
+
+          if (!(Test-Path $ytDlpPath)) {
+            throw "Failed to download yt-dlp.exe"
+          }
+
+          $item = Get-Item $ytDlpPath
+          Write-Host "Downloaded yt-dlp.exe: $($item.Length) bytes"
+
+          # Verify it's a valid Windows executable (MZ header)
+          $bytes = [System.IO.File]::ReadAllBytes($ytDlpPath)
+          if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Downloaded yt-dlp.exe is not a valid Windows executable"
+          }
+
+          # Set environment variable for the spec file
+          $fullPath = (Resolve-Path $ytDlpPath).Path
+          "YTDLP_EXE=$fullPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "YTDLP_EXE set to: $fullPath"
 
       - name: Smoke-check imports
         run: |
@@ -108,17 +139,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ytDlpPath = @(
-            (Get-Command yt-dlp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
-            (Join-Path (python -c "import sysconfig; print(sysconfig.get_path('scripts'))") 'yt-dlp.exe')
-          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          # YTDLP_EXE is already set by the standalone download step
+          if (-not $env:YTDLP_EXE -or !(Test-Path $env:YTDLP_EXE)) {
+            throw "YTDLP_EXE not set or file not found. The standalone yt-dlp download step may have failed."
+          }
 
           $ffmpegPath = Get-Command ffmpeg -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue
           $ffprobePath = Get-Command ffprobe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue
 
-          if (-not $ytDlpPath) {
-            throw "Could not locate yt-dlp executable after dependency install."
-          }
           if (-not $ffmpegPath) {
             throw "Could not locate ffmpeg executable after dependency install."
           }
@@ -126,11 +154,13 @@ jobs:
             throw "Could not locate ffprobe executable after dependency install."
           }
 
-          "YTDLP_EXE=$ytDlpPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "FFMPEG_EXE=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "FFPROBE_EXE=$ffprobePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "Resolved runtime tool inputs for onefile packaging."
+          Write-Host "Runtime tools for packaging:"
+          Write-Host "  YTDLP_EXE: $env:YTDLP_EXE"
+          Write-Host "  FFMPEG_EXE: $ffmpegPath"
+          Write-Host "  FFPROBE_EXE: $ffprobePath"
 
       - name: Ensure Windows executable icon asset
         if: runner.os == 'Windows'
