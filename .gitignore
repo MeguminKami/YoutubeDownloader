@@ -7,6 +7,5 @@ build/
 dist/
 ui/logo.ico
 .pyinstaller-cache/
-.runtime/
-.runtime-test/
+.runtime*/
 .venv-packaging/

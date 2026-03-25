@@ -71,6 +71,8 @@ jobs:
 
       - name: Download runtime tools
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python packaging/download_runtime_tools.py \
             --platform "${{ matrix.platform }}" \

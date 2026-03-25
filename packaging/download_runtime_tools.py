@@ -13,11 +13,10 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Callable
 
 
 USER_AGENT = "YoutubeGrab-release-builder/1.0"
-GITHUB_API = "https://api.github.com/repos/{repo}/releases/latest"
+GITHUB_LATEST_DOWNLOAD = "https://github.com/{repo}/releases/latest/download/{asset_name}"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,14 +27,18 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _http_get_json(url: str) -> dict:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request) as response:
-        return json.loads(response.read().decode("utf-8"))
+def _request_headers() -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
+    return headers
 
 def _download_file(url: str, destination: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(url, headers=_request_headers())
     with urllib.request.urlopen(request) as response, open(destination, "wb") as handle:
         shutil.copyfileobj(response, handle)
 
@@ -70,18 +73,6 @@ def _run_version(path: Path, args: list[str]) -> str:
     return (result.stdout or result.stderr).strip().splitlines()[0]
 
 
-def _latest_release(repo: str) -> dict:
-    return _http_get_json(GITHUB_API.format(repo=repo))
-
-
-def _pick_asset(release: dict, matcher: Callable[[str], bool]) -> dict:
-    for asset in release.get("assets", []):
-        name = asset.get("name", "")
-        if matcher(name):
-            return asset
-    raise FileNotFoundError(f"Could not find a matching release asset in {release.get('html_url')}")
-
-
 def _extract_zip(archive_path: Path, destination: Path) -> None:
     with zipfile.ZipFile(archive_path) as archive:
         archive.extractall(destination)
@@ -99,36 +90,48 @@ def _find_file(root: Path, file_name: str) -> Path:
     return matches[0]
 
 
-def _github_binary_download(repo: str, matcher: Callable[[str], bool], destination: Path) -> tuple[Path, dict]:
-    release = _latest_release(repo)
-    asset = _pick_asset(release, matcher)
-    _download_file(asset["browser_download_url"], destination)
-    return destination, asset
+def _github_latest_download_url(repo: str, asset_name: str) -> str:
+    return GITHUB_LATEST_DOWNLOAD.format(repo=repo, asset_name=asset_name)
+
+
+def _download_github_latest_asset(repo: str, asset_name: str, destination: Path) -> dict:
+    download_url = _github_latest_download_url(repo, asset_name)
+    _download_file(download_url, destination)
+    return {
+        "asset_name": asset_name,
+        "source_url": download_url,
+    }
+
+
+def _download_first_available_github_asset(repo: str, asset_names: list[str], destination: Path) -> dict:
+    last_error: Exception | None = None
+    for asset_name in asset_names:
+        try:
+            return _download_github_latest_asset(repo, asset_name, destination)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Unable to download any expected asset from {repo}: {asset_names}") from last_error
 
 
 def _install_yt_dlp(platform: str, bin_dir: Path) -> dict:
     candidate_names = {
-        "windows": {"yt-dlp.exe"},
-        "linux": {"yt-dlp_linux"},
-        "macos": {"yt-dlp_macos", "yt-dlp"},
+        "windows": ["yt-dlp.exe"],
+        "linux": ["yt-dlp_linux"],
+        "macos": ["yt-dlp_macos", "yt-dlp"],
     }[platform]
 
     destination_name = "yt-dlp.exe" if platform == "windows" else "yt-dlp"
     output_path = bin_dir / destination_name
 
-    file_path, asset = _github_binary_download(
-        "yt-dlp/yt-dlp",
-        lambda name: name in candidate_names,
-        output_path,
-    )
-    _make_executable(file_path)
+    asset = _download_first_available_github_asset("yt-dlp/yt-dlp", candidate_names, output_path)
+    _make_executable(output_path)
 
     return {
-        "path": file_path,
-        "asset_name": asset["name"],
-        "source_url": asset["browser_download_url"],
-        "version": _run_version(file_path, ["--version"]),
-        "sha256": _sha256(file_path),
+        "path": output_path,
+        "asset_name": asset["asset_name"],
+        "source_url": asset["source_url"],
+        "version": _run_version(output_path, ["--version"]),
+        "sha256": _sha256(output_path),
     }
 
 
@@ -140,11 +143,7 @@ def _install_deno(platform: str, bin_dir: Path, temp_dir: Path) -> dict:
     }[platform]
 
     archive_path = temp_dir / asset_name
-    _, asset = _github_binary_download(
-        "denoland/deno",
-        lambda name: name == asset_name,
-        archive_path,
-    )
+    asset = _download_github_latest_asset("denoland/deno", asset_name, archive_path)
 
     extract_dir = temp_dir / "deno"
     extract_dir.mkdir(parents=True, exist_ok=True)
@@ -158,20 +157,17 @@ def _install_deno(platform: str, bin_dir: Path, temp_dir: Path) -> dict:
 
     return {
         "path": target_binary,
-        "asset_name": asset["name"],
-        "source_url": asset["browser_download_url"],
+        "asset_name": asset["asset_name"],
+        "source_url": asset["source_url"],
         "version": _run_version(target_binary, ["--version"]),
         "sha256": _sha256(target_binary),
     }
 
 
 def _install_ffmpeg_windows(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
-    archive_path = temp_dir / "ffmpeg-win64-gpl.zip"
-    _, asset = _github_binary_download(
-        "BtbN/FFmpeg-Builds",
-        lambda name: "win64-gpl.zip" in name and "shared" not in name,
-        archive_path,
-    )
+    asset_name = "ffmpeg-master-latest-win64-gpl.zip"
+    archive_path = temp_dir / asset_name
+    asset = _download_github_latest_asset("BtbN/FFmpeg-Builds", asset_name, archive_path)
 
     extract_dir = temp_dir / "ffmpeg-windows"
     extract_dir.mkdir(parents=True, exist_ok=True)
@@ -188,15 +184,15 @@ def _install_ffmpeg_windows(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
     return {
         "ffmpeg": {
             "path": target_ffmpeg,
-            "asset_name": asset["name"],
-            "source_url": asset["browser_download_url"],
+            "asset_name": asset["asset_name"],
+            "source_url": asset["source_url"],
             "version": _run_version(target_ffmpeg, ["-version"]),
             "sha256": _sha256(target_ffmpeg),
         },
         "ffprobe": {
             "path": target_ffprobe,
-            "asset_name": asset["name"],
-            "source_url": asset["browser_download_url"],
+            "asset_name": asset["asset_name"],
+            "source_url": asset["source_url"],
             "version": _run_version(target_ffprobe, ["-version"]),
             "sha256": _sha256(target_ffprobe),
         },
@@ -204,12 +200,9 @@ def _install_ffmpeg_windows(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
 
 
 def _install_ffmpeg_linux(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
-    archive_path = temp_dir / "ffmpeg-linux64-gpl.tar.xz"
-    _, asset = _github_binary_download(
-        "BtbN/FFmpeg-Builds",
-        lambda name: "linux64-gpl.tar.xz" in name and "shared" not in name,
-        archive_path,
-    )
+    asset_name = "ffmpeg-master-latest-linux64-gpl.tar.xz"
+    archive_path = temp_dir / asset_name
+    asset = _download_github_latest_asset("BtbN/FFmpeg-Builds", asset_name, archive_path)
 
     extract_dir = temp_dir / "ffmpeg-linux"
     extract_dir.mkdir(parents=True, exist_ok=True)
@@ -228,15 +221,15 @@ def _install_ffmpeg_linux(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
     return {
         "ffmpeg": {
             "path": target_ffmpeg,
-            "asset_name": asset["name"],
-            "source_url": asset["browser_download_url"],
+            "asset_name": asset["asset_name"],
+            "source_url": asset["source_url"],
             "version": _run_version(target_ffmpeg, ["-version"]),
             "sha256": _sha256(target_ffmpeg),
         },
         "ffprobe": {
             "path": target_ffprobe,
-            "asset_name": asset["name"],
-            "source_url": asset["browser_download_url"],
+            "asset_name": asset["asset_name"],
+            "source_url": asset["source_url"],
             "version": _run_version(target_ffprobe, ["-version"]),
             "sha256": _sha256(target_ffprobe),
         },
