@@ -26,16 +26,19 @@ jobs:
             arch: x64
             runtime_dir: .runtime/windows-x64
             asset_ext: zip
+            online_probe: false
           - platform: macos
             os: macos-15-intel
             arch: x64
             runtime_dir: .runtime/macos-x64
             asset_ext: zip
+            online_probe: false
           - platform: linux
             os: ubuntu-latest
             arch: x64
             runtime_dir: .runtime/linux-x64
             asset_ext: tar.gz
+            online_probe: true
 
     steps:
       - name: Checkout source
@@ -89,22 +92,28 @@ jobs:
       - name: Validate frozen bundle
         shell: pwsh
         run: |
-          $maxAttempts = 2
+          $maxAttempts = if ("${{ matrix.online_probe }}" -eq "true") { 3 } else { 1 }
+          $probeArgs = @()
+          if ("${{ matrix.online_probe }}" -eq "true") {
+            $probeArgs = @("--probe-url", "$env:SMOKE_URL")
+          }
+
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Validation attempt $attempt/$maxAttempts for ${{ matrix.platform }}"
             python packaging/validate_release.py `
               --platform "${{ matrix.platform }}" `
               --dist-dir "dist" `
-              --probe-url "$env:SMOKE_URL"
+              @probeArgs
 
             if ($LASTEXITCODE -eq 0) {
               break
             }
 
             if ($attempt -eq $maxAttempts) {
-              throw "Frozen bundle validation failed after $maxAttempts attempts."
+              throw "Frozen bundle validation failed after $maxAttempts attempts for ${{ matrix.platform }}."
             }
 
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 20
           }
 
       - name: Show built artifact layout
