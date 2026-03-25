@@ -42,6 +42,11 @@ def _dedupe_entries(entries):
 
 
 def _runtime_tool_entries():
+    """Return runtime tools as datas (not binaries) to avoid PyInstaller processing.
+
+    Adding these as binaries causes PyInstaller to analyze/modify them, which corrupts
+    executables like yt-dlp that are themselves PyInstaller onefile bundles.
+    """
     entries = []
     runtime_bin_dir = RUNTIME_DIR / "bin"
     if runtime_bin_dir.is_dir():
@@ -54,7 +59,8 @@ def _runtime_tool_entries():
 datas = [
     (str(ROOT / "ui" / "logo.png"), "ui"),
 ]
-binaries = _runtime_tool_entries()
+datas.extend(_runtime_tool_entries())
+binaries = []
 hiddenimports = [
     "PIL._tkinter_finder",
     "PIL.ImageTk",
