@@ -1,94 +1,88 @@
 # -*- mode: python ; coding: utf-8 -*-
+from __future__ import annotations
 
 import os
-import shutil
 import sys
-import sysconfig
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all
 
 
-def _spec_dir() -> str:
-    # PyInstaller may execute spec files without defining __file__.
-    spec_path = globals().get('__file__') or globals().get('SPEC')
+def _spec_root() -> Path:
+    spec_path = globals().get("__file__") or globals().get("SPEC")
     if spec_path:
-        return os.path.dirname(os.path.abspath(spec_path))
+        return Path(spec_path).resolve().parent
 
-    spec_dir = globals().get('SPECPATH')
+    spec_dir = globals().get("SPECPATH")
     if spec_dir:
-        return os.path.abspath(spec_dir)
+        return Path(spec_dir).resolve()
 
-    if sys.argv and sys.argv[-1].lower().endswith('.spec'):
-        return os.path.dirname(os.path.abspath(sys.argv[-1]))
-
-    return os.path.abspath(os.getcwd())
+    return Path.cwd().resolve()
 
 
-def _asset_path(*parts: str) -> str:
-    return os.path.join(_spec_dir(), *parts)
+ROOT = _spec_root()
+APP_NAME = os.environ.get("YTG_APP_NAME", "YoutubeGrab")
+APP_VERSION = os.environ.get("YTG_APP_VERSION", "0.0.0")
+RUNTIME_DIR = Path(os.environ.get("YTG_RUNTIME_DIR", ROOT / ".runtime")).resolve()
+WINDOWS_ICON = os.environ.get("YTG_WINDOWS_ICON")
+MACOS_ICON = os.environ.get("YTG_MACOS_ICON")
+MACOS_BUNDLE_ID = os.environ.get("YTG_MACOS_BUNDLE_ID", "com.joaoc.youtubegrab")
 
 
-def _resolve_windows_icon() -> str:
-    icon_path = _asset_path('ui', 'logo.ico')
-    if os.path.isfile(icon_path):
-        return icon_path
+def _dedupe_entries(entries):
+    seen = set()
+    deduped = []
+    for source, dest in entries:
+        key = (str(source), str(dest))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((str(source), str(dest)))
+    return deduped
 
-    png_path = _asset_path('ui', 'logo.png')
-    if not os.path.isfile(png_path):
-        raise SystemExit('Missing icon asset: ui/logo.png')
 
+def _runtime_tool_entries():
+    entries = []
+    runtime_bin_dir = RUNTIME_DIR / "bin"
+    if runtime_bin_dir.is_dir():
+        for path in sorted(runtime_bin_dir.iterdir()):
+            if path.is_file():
+                entries.append((str(path), os.path.join("runtime", "bin")))
+    return entries
+
+
+datas = [
+    (str(ROOT / "ui" / "logo.png"), "ui"),
+]
+binaries = _runtime_tool_entries()
+hiddenimports = [
+    "PIL._tkinter_finder",
+    "PIL.ImageTk",
+]
+
+
+for package_name in ("customtkinter", "yt_dlp", "yt_dlp_ejs"):
     try:
-        from PIL import Image
-        with Image.open(png_path) as icon_source:
-            icon_source.save(icon_path, format='ICO', sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (256, 256)])
-    except Exception as exc:
-        raise SystemExit(f'Unable to create ui/logo.ico from ui/logo.png: {exc}')
+        package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
+    except Exception:
+        continue
 
-    if not os.path.isfile(icon_path):
-        raise SystemExit('Unable to resolve icon asset: ui/logo.ico')
-    return icon_path
+    datas.extend(package_datas)
+    binaries.extend(package_binaries)
+    hiddenimports.extend(package_hiddenimports)
 
 
-def _windows_runtime_binary(name: str) -> str:
-    env_var = f"{name.upper().replace('-', '')}_EXE"
-    env_candidate = os.environ.get(env_var)
-
-    # Debug output for CI troubleshooting
-    print(f"[spec] Looking for {name}: env_var={env_var}, env_value={env_candidate}")
-
-    scripts_dir = sysconfig.get_path('scripts')
-    candidates = [
-        env_candidate,
-        os.path.join(scripts_dir, f'{name}.exe') if scripts_dir else None,
-        shutil.which(f'{name}.exe'),
-        shutil.which(name),
-    ]
-
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            print(f"[spec] Found {name} at: {candidate}")
-            return candidate
-        elif candidate:
-            print(f"[spec] Candidate {candidate} does not exist")
-
-    raise SystemExit(f"Missing required Windows runtime tool for packaging: {name}.exe (checked env var {env_var}={env_candidate})")
-
-
-windows_binaries = []
-windows_icon = None
-if os.name == 'nt':
-    windows_binaries = [
-        (_windows_runtime_binary('yt-dlp'), '.'),
-        (_windows_runtime_binary('ffmpeg'), '.'),
-        (_windows_runtime_binary('ffprobe'), '.'),
-    ]
-    windows_icon = _resolve_windows_icon()
+manifest_path = RUNTIME_DIR / "manifest.json"
+if manifest_path.is_file():
+    datas.append((str(manifest_path), "runtime"))
 
 
 a = Analysis(
-    [_asset_path('main.py')],
-    pathex=[],
-    binaries=windows_binaries,
-    datas=[(_asset_path('ui', 'logo.png'), 'ui')],
-    hiddenimports=['yt_dlp', 'yt_dlp.extractor', 'yt_dlp.postprocessor'],
+    [str(ROOT / "main.py")],
+    pathex=[str(ROOT)],
+    binaries=_dedupe_entries(binaries),
+    datas=_dedupe_entries(datas),
+    hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -98,45 +92,125 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    exclude_binaries=False,
-    name='YoutubeGrab',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=windows_icon,
-)
 
-exe_dev = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    exclude_binaries=False,
-    name='YoutubeGrabDev',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=windows_icon,
-)
+if sys.platform == "win32":
+    gui_exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=WINDOWS_ICON or None,
+    )
 
+    debug_exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=f"{APP_NAME}Debug",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=WINDOWS_ICON or None,
+    )
+
+    coll = COLLECT(
+        gui_exe,
+        debug_exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name=APP_NAME,
+    )
+
+elif sys.platform == "darwin":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=MACOS_ICON or None,
+    )
+
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name=APP_NAME,
+    )
+
+    app = BUNDLE(
+        coll,
+        name=f"{APP_NAME}.app",
+        icon=MACOS_ICON or None,
+        bundle_identifier=MACOS_BUNDLE_ID,
+        version=APP_VERSION,
+        info_plist={
+            "CFBundleName": APP_NAME,
+            "CFBundleDisplayName": APP_NAME,
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
+            "NSHighResolutionCapable": "True",
+        },
+    )
+
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=None,
+    )
+
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name=APP_NAME,
+    )

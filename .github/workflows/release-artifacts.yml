@@ -3,495 +3,142 @@ name: Build Release Artifacts
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  APP_NAME: YoutubeGrab
+  PYTHON_VERSION: "3.12"
+  SMOKE_URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            platform: windows
-            verify_path: dist/YoutubeGrab.exe
-            verify_debug_path: dist/YoutubeGrabDev.exe
-            package_path: dist/YoutubeGrab.exe
-            package_type: file
-            archive_ext: zip
-          - os: macos-latest
-            platform: macos
-            verify_path: dist/YoutubeGrab.app
-            package_path: dist/YoutubeGrab.app
-            package_type: dir
-            archive_ext: zip
-          - os: ubuntu-latest
-            platform: linux
-            verify_path: dist/YoutubeGrab/YoutubeGrab
-            package_path: dist/YoutubeGrab
-            package_type: dir
-            archive_ext: zip
-
-    env:
-      APP_NAME: YoutubeGrab
-      VERSION: ${{ github.ref_name }}
+          - platform: windows
+            os: windows-latest
+            arch: x64
+            runtime_dir: .runtime/windows-x64
+            asset_ext: zip
+          - platform: macos
+            os: macos-15-intel
+            arch: x64
+            runtime_dir: .runtime/macos-x64
+            asset_ext: zip
+          - platform: linux
+            os: ubuntu-latest
+            arch: x64
+            runtime_dir: .runtime/linux-x64
+            asset_ext: tar.gz
 
     steps:
-      - name: Print JavaScript action runtime compatibility mode
-        shell: pwsh
-        run: |
-          Write-Host "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=$env:FORCE_JAVASCRIPT_ACTIONS_TO_NODE24"
-          if ($env:FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 -ne 'true') {
-            throw "Node 24 compatibility override is not enabled."
-          }
-
       - name: Checkout source
         uses: actions/checkout@v6
 
       - name: Validate release tag format
         shell: bash
         run: |
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+$ ]]; then
-            echo "Tag must match vX.Y. Got: ${GITHUB_REF_NAME}"
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+(\.[0-9]+){1,2}([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag must look like v1.2 or v1.2.3. Got: ${GITHUB_REF_NAME}"
             exit 1
           fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements-build.txt
 
-      - name: Install Linux Tk runtime build dependencies
+      - name: Install Linux GUI build prerequisites
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-tk xvfb
 
-      - name: Install dependencies
+      - name: Install build dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          # Install yt_dlp Python module for hiddenimports (not for the binary)
-          python -m pip install yt-dlp
-          python -m pip install pyinstaller
+          python -m pip install -r requirements-build.txt
 
-      - name: Download standalone yt-dlp binary (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Download the standalone yt-dlp.exe binary (not the pip wrapper)
-          # This is required because pip-installed yt-dlp.exe is just a Python wrapper
-          # that won't work inside a frozen PyInstaller bundle
-          $ytDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-          $ytDlpPath = "yt-dlp-standalone.exe"
-
-          Write-Host "Downloading standalone yt-dlp.exe from $ytDlpUrl"
-          Invoke-WebRequest -Uri $ytDlpUrl -OutFile $ytDlpPath -UseBasicParsing
-
-          if (!(Test-Path $ytDlpPath)) {
-            throw "Failed to download yt-dlp.exe"
-          }
-
-          $item = Get-Item $ytDlpPath
-          Write-Host "Downloaded yt-dlp.exe: $($item.Length) bytes"
-
-          # Verify it's a valid Windows executable (MZ header)
-          $bytes = [System.IO.File]::ReadAllBytes($ytDlpPath)
-          if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-            throw "Downloaded yt-dlp.exe is not a valid Windows executable"
-          }
-
-          # Set environment variable for the spec file
-          $fullPath = (Resolve-Path $ytDlpPath).Path
-          "YTDLP_EXE=$fullPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "YTDLP_EXE set to: $fullPath"
-
-      - name: Smoke-check imports
-        run: |
-          python -c "import main; print('import-ok')"
-
-      - name: Install FFmpeg tools (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install ffmpeg -y --no-progress
-
-          # Chocolatey installs actual binaries in lib directory, not just the shims in bin
-          # The shims in C:\ProgramData\chocolatey\bin are tiny wrappers - we need the real binaries
-          $ffmpegLibPath = "C:\ProgramData\chocolatey\lib\ffmpeg"
-
-          if (!(Test-Path $ffmpegLibPath)) {
-            throw "FFmpeg lib directory not found after chocolatey install"
-          }
-
-          # Find the actual ffmpeg.exe (not the shim)
-          $ffmpegExe = Get-ChildItem $ffmpegLibPath -Recurse -Filter "ffmpeg.exe" |
-                       Where-Object { $_.Length -gt 10MB } |
-                       Select-Object -First 1 -ExpandProperty FullName
-
-          if (-not $ffmpegExe) {
-            throw "Could not find actual ffmpeg.exe binary (>10MB) in chocolatey lib directory"
-          }
-
-          $ffprobeExe = Join-Path (Split-Path $ffmpegExe -Parent) "ffprobe.exe"
-
-          if (!(Test-Path $ffprobeExe)) {
-            throw "ffprobe.exe not found alongside ffmpeg.exe at: $ffprobeExe"
-          }
-
-          # Verify file sizes
-          $ffmpegSize = (Get-Item $ffmpegExe).Length
-          $ffprobeSize = (Get-Item $ffprobeExe).Length
-
-          Write-Host "Found FFmpeg binaries:"
-          Write-Host "  ffmpeg.exe: $ffmpegExe ($([math]::Round($ffmpegSize / 1MB, 2)) MB)"
-          Write-Host "  ffprobe.exe: $ffprobeExe ($([math]::Round($ffprobeSize / 1MB, 2)) MB)"
-
-          if ($ffmpegSize -lt 10MB -or $ffprobeSize -lt 10MB) {
-            throw "FFmpeg binaries are too small - found shims instead of real binaries"
-          }
-
-          # Set environment variables for next steps
-          "FFMPEG_EXE=$ffmpegExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "FFPROBE_EXE=$ffprobeExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Resolve Windows runtime tool inputs
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Verify YTDLP_EXE is set by the standalone download step
-          if (-not $env:YTDLP_EXE -or !(Test-Path $env:YTDLP_EXE)) {
-            throw "YTDLP_EXE not set or file not found. The standalone yt-dlp download step may have failed."
-          }
-
-          # Verify FFMPEG_EXE and FFPROBE_EXE are set by the FFmpeg install step
-          if (-not $env:FFMPEG_EXE -or !(Test-Path $env:FFMPEG_EXE)) {
-            throw "FFMPEG_EXE not set or file not found. The FFmpeg install step may have failed."
-          }
-          if (-not $env:FFPROBE_EXE -or !(Test-Path $env:FFPROBE_EXE)) {
-            throw "FFPROBE_EXE not set or file not found. The FFmpeg install step may have failed."
-          }
-
-          # Verify all binaries are valid Windows executables with proper sizes
-          $binaries = @(
-            @{Name="yt-dlp"; Path=$env:YTDLP_EXE; MinSize=8MB},
-            @{Name="ffmpeg"; Path=$env:FFMPEG_EXE; MinSize=50MB},
-            @{Name="ffprobe"; Path=$env:FFPROBE_EXE; MinSize=50MB}
-          )
-
-          Write-Host "Runtime tools for packaging:"
-          foreach ($binary in $binaries) {
-            $size = (Get-Item $binary.Path).Length
-            Write-Host "  $($binary.Name): $($binary.Path)"
-            Write-Host "    Size: $([math]::Round($size / 1MB, 2)) MB"
-
-            if ($size -lt $binary.MinSize) {
-              throw "$($binary.Name) size $([math]::Round($size / 1MB, 2)) MB is too small (min $([math]::Round($binary.MinSize / 1MB, 2)) MB)"
-            }
-
-            # Verify MZ header
-            $bytes = [System.IO.File]::ReadAllBytes($binary.Path)
-            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "$($binary.Name) is not a valid Windows executable"
-            }
-          }
-
-          Write-Host "`nAll runtime tools validated and ready for packaging."
-
-      - name: Ensure Windows executable icon asset
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (!(Test-Path 'ui/logo.png')) {
-            throw "Missing required logo asset: ui/logo.png"
-          }
-
-          if (!(Test-Path 'ui/logo.ico')) {
-            python -c "from PIL import Image; im = Image.open('ui/logo.png'); im.save('ui/logo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(256,256)])"
-          }
-
-          if (!(Test-Path 'ui/logo.ico')) {
-            throw "Unable to prepare Windows executable icon: ui/logo.ico"
-          }
-
-          $icon = Get-Item 'ui/logo.ico'
-          if ($icon.Length -le 0) {
-            throw "Prepared icon is empty: ui/logo.ico"
-          }
-
-          Write-Host "Windows executable icon asset ready: ui/logo.ico"
-
-      - name: Build executable with PyInstaller (Windows onefile)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Debug: verify environment variables are set
-          Write-Host "Verifying environment variables before PyInstaller..."
-          Write-Host "YTDLP_EXE: $env:YTDLP_EXE"
-          Write-Host "FFMPEG_EXE: $env:FFMPEG_EXE"
-          Write-Host "FFPROBE_EXE: $env:FFPROBE_EXE"
-
-          # Verify all required binaries exist and are valid
-          $requiredBinaries = @(
-            @{Name="yt-dlp"; Path=$env:YTDLP_EXE; MinSize=8MB},
-            @{Name="ffmpeg"; Path=$env:FFMPEG_EXE; MinSize=10MB},
-            @{Name="ffprobe"; Path=$env:FFPROBE_EXE; MinSize=10MB}
-          )
-
-          foreach ($binary in $requiredBinaries) {
-            if (-not $binary.Path) {
-              throw "$($binary.Name): Environment variable not set"
-            }
-            if (!(Test-Path $binary.Path)) {
-              throw "$($binary.Name): File not found at $($binary.Path)"
-            }
-            $size = (Get-Item $binary.Path).Length
-            Write-Host "$($binary.Name): $([math]::Round($size / 1MB, 2)) MB"
-            if ($size -lt $binary.MinSize) {
-              throw "$($binary.Name): File size $([math]::Round($size / 1MB, 2)) MB is too small (minimum $([math]::Round($binary.MinSize / 1MB, 2)) MB)"
-            }
-
-            # Verify it's a valid Windows executable (MZ header)
-            $bytes = [System.IO.File]::ReadAllBytes($binary.Path)
-            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "$($binary.Name): Not a valid Windows executable (missing MZ header)"
-            }
-          }
-
-          Write-Host "`nAll binaries validated. Running PyInstaller..."
-
-          # Run PyInstaller with explicit environment variable display
-          $env:PSModulePath = "" # Avoid potential PATH pollution
-          python -m PyInstaller --noconfirm --clean YoutubeGrab.spec
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "PyInstaller failed with exit code $LASTEXITCODE"
-          }
-
-          Write-Host "PyInstaller build completed successfully"
-
-      - name: Validate onefile packaging inputs (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Write-Host "Validating input binaries..."
-          $requiredTools = @($env:YTDLP_EXE, $env:FFMPEG_EXE, $env:FFPROBE_EXE)
-          $totalInputSize = 0
-
-          foreach ($toolPath in $requiredTools) {
-            if (-not $toolPath -or !(Test-Path $toolPath)) {
-              throw "Missing required runtime tool input: $toolPath"
-            }
-            $item = Get-Item $toolPath
-            if ($item.Length -le 0) {
-              throw "Runtime tool input is empty: $toolPath"
-            }
-            $bytes = [System.IO.File]::ReadAllBytes($toolPath)
-            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "Runtime tool input is not a valid Windows executable: $toolPath"
-            }
-            Write-Host "  $(Split-Path -Leaf $toolPath): $([math]::Round($item.Length / 1MB, 2)) MB"
-            $totalInputSize += $item.Length
-          }
-
-          Write-Host "`nTotal input binaries size: $([math]::Round($totalInputSize / 1MB, 2)) MB"
-
-          if (!(Test-Path 'dist/YoutubeGrab.exe')) {
-            throw "Onefile executable was not produced."
-          }
-
-          if (!(Test-Path 'dist/YoutubeGrabDev.exe')) {
-            throw "Debug onefile executable was not produced."
-          }
-
-          $mainExe = Get-Item 'dist/YoutubeGrab.exe'
-          $devExe = Get-Item 'dist/YoutubeGrabDev.exe'
-
-          Write-Host "`nOutput executables:"
-          Write-Host "  YoutubeGrab.exe: $([math]::Round($mainExe.Length / 1MB, 2)) MB"
-          Write-Host "  YoutubeGrabDev.exe: $([math]::Round($devExe.Length / 1MB, 2)) MB"
-
-          # The output exe should be at least as large as the input binaries
-          # (actually it should be larger due to Python runtime, but let's check minimum)
-          $minExpectedSize = $totalInputSize * 0.8  # Allow some compression
-          if ($mainExe.Length -lt $minExpectedSize) {
-            throw "YoutubeGrab.exe size $([math]::Round($mainExe.Length / 1MB, 2)) MB is suspiciously small. Expected at least $([math]::Round($minExpectedSize / 1MB, 2)) MB based on input binaries. Binaries may not be packaged correctly."
-          }
-
-          Write-Host "`nValidated onefile packaging inputs and output executables."
-
-      - name: Build executable with PyInstaller (macOS/Linux)
-        if: runner.os != 'Windows'
-        shell: pwsh
-        run: |
-          $sep = if ($env:RUNNER_OS -eq 'Windows') { ';' } else { ':' }
-          $hiddenImports = @()
-          if ($env:RUNNER_OS -eq 'Linux') {
-            # Pillow+Tk in frozen Linux builds needs this helper explicitly bundled.
-            $hiddenImports += '--hidden-import'
-            $hiddenImports += 'PIL._tkinter_finder'
-            $hiddenImports += '--hidden-import'
-            $hiddenImports += 'PIL.ImageTk'
-          }
-
-          python -m PyInstaller --noconfirm --clean --windowed `
-            --name "$env:APP_NAME" `
-            --add-data "ui/logo.png${sep}ui" `
-            @hiddenImports `
-            main.py
-
-      - name: Verify executable artifact
-        shell: pwsh
-        run: |
-          $artifactPath = "${{ matrix.verify_path }}"
-          if (!(Test-Path $artifactPath)) {
-            throw "Expected build output not found: $artifactPath"
-          }
-
-          if ($env:RUNNER_OS -eq 'Windows') {
-            if ($artifactPath -notlike '*.exe') {
-              throw "Windows artifact is not an EXE: $artifactPath"
-            }
-            $item = Get-Item $artifactPath
-            if ($item.Length -le 0) {
-              throw "Executable is empty: $artifactPath"
-            }
-            $bytes = [System.IO.File]::ReadAllBytes($artifactPath)
-            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "Windows executable does not have MZ header: $artifactPath"
-            }
-
-            $debugExePath = "${{ matrix.verify_debug_path }}"
-            if (!(Test-Path $debugExePath)) {
-              throw "Expected debug build output not found: $debugExePath"
-            }
-            $debugItem = Get-Item $debugExePath
-            if ($debugItem.Length -le 0) {
-              throw "Debug executable is empty: $debugExePath"
-            }
-            $debugBytes = [System.IO.File]::ReadAllBytes($debugExePath)
-            if ($debugBytes.Length -lt 2 -or $debugBytes[0] -ne 0x4D -or $debugBytes[1] -ne 0x5A) {
-              throw "Windows debug executable does not have MZ header: $debugExePath"
-            }
-          }
-
-          if ($env:RUNNER_OS -eq 'macOS') {
-            if ($artifactPath -notlike '*.app') {
-              throw "macOS artifact is not an .app bundle: $artifactPath"
-            }
-            $bundleExecutable = Join-Path $artifactPath "Contents/MacOS/$env:APP_NAME"
-            $plist = Join-Path $artifactPath "Contents/Info.plist"
-            if (!(Test-Path $bundleExecutable)) {
-              throw "Missing macOS app executable: $bundleExecutable"
-            }
-            if (!(Test-Path $plist)) {
-              throw "Missing macOS Info.plist: $plist"
-            }
-            & chmod +x $bundleExecutable
-          }
-
-          if ($env:RUNNER_OS -eq 'Linux') {
-            $item = Get-Item $artifactPath
-            if ($item.Length -le 0) {
-              throw "Linux binary is empty: $artifactPath"
-            }
-            & chmod +x $artifactPath
-            $bytes = [System.IO.File]::ReadAllBytes($artifactPath)
-            if ($bytes.Length -lt 4 -or $bytes[0] -ne 0x7F -or $bytes[1] -ne 0x45 -or $bytes[2] -ne 0x4C -or $bytes[3] -ne 0x46) {
-              throw "Linux artifact is not an ELF binary: $artifactPath"
-            }
-          }
-
-          $invalidInstallerExtensions = @('.msi', '.pkg', '.deb', '.rpm')
-          foreach ($ext in $invalidInstallerExtensions) {
-            if ($artifactPath.ToLower().EndsWith($ext)) {
-              throw "Installer output is not allowed: $artifactPath"
-            }
-          }
-
-          Write-Host "Verified release output: $artifactPath"
-
-      - name: Smoke test executable launch (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $exe = "${{ matrix.verify_debug_path }}"
-          $process = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 5
-          if ($process.HasExited -and $process.ExitCode -ne 0) {
-            throw "Windows app exited immediately with code $($process.ExitCode)"
-          }
-          if (-not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force
-          }
-
-      - name: Smoke test executable launch (Linux)
-        if: runner.os == 'Linux'
+      - name: Download runtime tools
         shell: bash
         run: |
-          chmod +x "${{ matrix.verify_path }}"
-          xvfb-run -a "${{ matrix.verify_path }}" &
-          PID=$!
-          sleep 5
-          if ! kill -0 "$PID" 2>/dev/null; then
-            wait "$PID"
-            RC=$?
-            if [ "$RC" -ne 0 ]; then
-              echo "Linux app exited early with code $RC"
-              exit 1
-            fi
-          fi
-          kill "$PID" || true
+          python packaging/download_runtime_tools.py \
+            --platform "${{ matrix.platform }}" \
+            --output-dir "${{ matrix.runtime_dir }}"
 
-      - name: Verify macOS bundle metadata
-        if: runner.os == 'macOS'
+      - name: Build release bundle
         shell: bash
         run: |
-          APP_PATH="${{ matrix.verify_path }}"
-          test -d "$APP_PATH"
-          test -f "$APP_PATH/Contents/Info.plist"
-          test -f "$APP_PATH/Contents/MacOS/${APP_NAME}"
-          file "$APP_PATH/Contents/MacOS/${APP_NAME}"
+          python packaging/build_release.py \
+            --platform "${{ matrix.platform }}" \
+            --runtime-dir "${{ matrix.runtime_dir }}" \
+            --version "${GITHUB_REF_NAME}"
 
-      - name: Package executable artifact
+      - name: Validate frozen bundle
         shell: pwsh
         run: |
-          $artifactBase = "$env:APP_NAME-$env:VERSION-${{ matrix.platform }}-x64"
-          $stagingRoot = Join-Path $PWD "release-staging"
-          $assetRoot = Join-Path $PWD "release-assets"
-          $stagingDir = Join-Path $stagingRoot $artifactBase
+          $maxAttempts = 2
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            python packaging/validate_release.py `
+              --platform "${{ matrix.platform }}" `
+              --dist-dir "dist" `
+              --probe-url "$env:SMOKE_URL"
 
-          New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-          New-Item -ItemType Directory -Path $assetRoot -Force | Out-Null
-
-          if ("${{ matrix.package_type }}" -eq "dir") {
-            Copy-Item "${{ matrix.package_path }}" $stagingDir -Recurse
-          } else {
-            Copy-Item "${{ matrix.package_path }}" $stagingDir
-            if ($env:RUNNER_OS -eq 'Windows') {
-              Copy-Item "${{ matrix.verify_debug_path }}" $stagingDir
+            if ($LASTEXITCODE -eq 0) {
+              break
             }
+
+            if ($attempt -eq $maxAttempts) {
+              throw "Frozen bundle validation failed after $maxAttempts attempts."
+            }
+
+            Start-Sleep -Seconds 10
           }
 
-          $archivePath = Join-Path $assetRoot "$artifactBase.${{ matrix.archive_ext }}"
-          Compress-Archive -Path (Join-Path $stagingDir "*") -DestinationPath $archivePath -Force
+      - name: Show built artifact layout
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
 
-          Write-Host "Packaged artifact: $archivePath"
+      - name: Package Windows artifact
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $artifactBase = "$env:APP_NAME-$env:GITHUB_REF_NAME-${{ matrix.platform }}-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          Compress-Archive -Path "dist\$env:APP_NAME" -DestinationPath "release-assets\$artifactBase.zip" -Force
+
+      - name: Package macOS artifact
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          artifact_base="${APP_NAME}-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
+          mkdir -p release-assets
+          ditto -c -k --keepParent "dist/${APP_NAME}.app" "release-assets/${artifact_base}.zip"
+
+      - name: Package Linux artifact
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          artifact_base="${APP_NAME}-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
+          mkdir -p release-assets
+          tar -C dist -czf "release-assets/${artifact_base}.tar.gz" "${APP_NAME}"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.platform }}
-          path: release-assets/*.zip
+          name: ${{ env.APP_NAME }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-assets/*
           if-no-files-found: error
 
   publish-release:
@@ -500,45 +147,35 @@ jobs:
     needs: build
 
     steps:
-      - name: Print JavaScript action runtime compatibility mode
-        shell: bash
-        run: |
-          echo "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=${FORCE_JAVASCRIPT_ACTIONS_TO_NODE24}"
-          [ "${FORCE_JAVASCRIPT_ACTIONS_TO_NODE24}" = "true" ] || { echo "Node 24 compatibility override is not enabled."; exit 1; }
-
-      - name: Download all packaged artifacts
+      - name: Download packaged artifacts
         uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
 
-      - name: Verify release assets are present and correctly named
+      - name: Verify packaged assets
         shell: bash
         run: |
           shopt -s nullglob
           files=(release-assets/*)
-          if [ ${#files[@]} -lt 3 ]; then
-            echo "Expected at least 3 release files (windows/macos/linux), got ${#files[@]}"
-            ls -la release-assets
+          if [ ${#files[@]} -ne 3 ]; then
+            echo "Expected exactly 3 release artifacts, found ${#files[@]}"
+            ls -la release-assets || true
             exit 1
           fi
 
-          for f in "${files[@]}"; do
-            base="$(basename "$f")"
+          for file in "${files[@]}"; do
+            [ -s "$file" ] || { echo "Artifact is empty: $file"; exit 1; }
+            base="$(basename "$file")"
             [[ "$base" == *"-${GITHUB_REF_NAME}-"* ]] || { echo "Version missing from asset name: $base"; exit 1; }
             [[ "$base" == *"-windows-"* || "$base" == *"-macos-"* || "$base" == *"-linux-"* ]] || { echo "Platform missing from asset name: $base"; exit 1; }
-            [[ "$base" == *.zip ]] || { echo "Only zip binary bundles are allowed: $base"; exit 1; }
-            [[ "$base" != *.msi && "$base" != *.pkg && "$base" != *.deb && "$base" != *.rpm ]] || { echo "Installer output is not allowed: $base"; exit 1; }
-            [ -s "$f" ] || { echo "Asset is empty: $base"; exit 1; }
           done
 
           ls -la release-assets
 
-      - name: Create or update release with executable assets
-        # Keep v2: latest stable major available for this action (currently uses node20).
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: release-assets/*.zip
-
+          files: release-assets/*

@@ -678,7 +678,7 @@ class YoutubeGrabApp(ctk.CTk):
         def on_failure():
             messagebox.showerror(
                 "Installation Failed",
-                "Could not install yt-dlp.\n\nInstall it manually with:\npip install yt-dlp"
+                "Could not install yt-dlp.\n\nInstall it manually with:\npip install \"yt-dlp[default]\""
             )
             self.quit()
 

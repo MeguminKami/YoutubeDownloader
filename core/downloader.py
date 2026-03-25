@@ -18,7 +18,14 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional
 
 
-from core.deps import find_bundled_binary, is_frozen_runtime
+from core.deps import (
+    build_yt_dlp_command,
+    build_yt_dlp_python_options,
+    get_runtime_diagnostics,
+    is_frozen_runtime,
+    resolve_ffmpeg_binary,
+    resolve_ffprobe_binary,
+)
 from core.models import DownloadPlan
 
 # Security: Maximum allowed download size (10 GB)
@@ -32,44 +39,6 @@ SUBPROCESS_TEXT_KWARGS = {
     'encoding': 'utf-8',
     'errors': 'replace',
 }
-
-
-def resolve_runtime_tool(tool_name: str, allow_python_module_fallback: bool = False) -> Optional[List[str]]:
-    """
-    Resolve runtime tool command in this order:
-    1) bundled in _MEIPASS
-    2) bundled beside sys.executable
-    3) PATH
-    4) python -m yt_dlp (dev mode only)
-    """
-    bundled_binary = find_bundled_binary(tool_name)
-    if bundled_binary:
-        return [bundled_binary]
-
-    path_binary = shutil.which(tool_name)
-    if path_binary:
-        return [path_binary]
-
-    if allow_python_module_fallback and tool_name == 'yt-dlp' and not is_frozen_runtime():
-        return [sys.executable, '-m', 'yt_dlp']
-
-    return None
-
-
-def resolve_binary(tool_name: str) -> Optional[str]:
-    """Resolve helper binary path (bundled-first, then PATH)."""
-    command = resolve_runtime_tool(tool_name)
-    if command and len(command) == 1:
-        return command[0]
-    return None
-
-
-def resolve_ffmpeg_binary() -> Optional[str]:
-    return resolve_binary('ffmpeg')
-
-
-def resolve_ffprobe_binary() -> Optional[str]:
-    return resolve_binary('ffprobe')
 
 
 class DownloadPipelineError(RuntimeError):
@@ -193,8 +162,8 @@ class Downloader:
             'file_access_retries': 3,
             'concurrent_fragment_downloads': 1,
             'http_chunk_size': 10 * 1024 * 1024,
-            'remotecomponents': ['ejs:github'],  # Enable JS challenge solver
         }
+        opts.update(build_yt_dlp_python_options())
 
         # Add cookie file if available
         if self.cookie_manager:
@@ -205,7 +174,7 @@ class Downloader:
 
     def _yt_dlp_base_command(self) -> List[str]:
         """Return preferred yt-dlp command form using unified runtime resolver."""
-        command = resolve_runtime_tool('yt-dlp', allow_python_module_fallback=True)
+        command = build_yt_dlp_command(allow_python_fallback=True)
         if command:
             return command
 
@@ -288,10 +257,8 @@ class Downloader:
         except Exception as exc:
             return {'video_formats': [], 'error': str(exc)}
 
-    def _build_list_formats_command(self, url: str, enable_remote_components: bool = True) -> List[str]:
+    def _build_list_formats_command(self, url: str) -> List[str]:
         command = self._yt_dlp_base_command()
-        if enable_remote_components:
-            command += ['--remote-components', 'ejs:github']
         command += [
             '--list-formats',
             '--no-warnings',
@@ -307,7 +274,7 @@ class Downloader:
         return command
 
     def _run_list_formats(self, url: str, timeout: int = 120) -> subprocess.CompletedProcess:
-        command = self._build_list_formats_command(url, enable_remote_components=True)
+        command = self._build_list_formats_command(url)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
         # Debug: print command info for troubleshooting frozen build issues
@@ -355,31 +322,7 @@ class Downloader:
             print(f"[DEBUG] OSError: {e}")
             raise RuntimeError(f"Failed to run yt-dlp: {e}")
 
-        if first.returncode == 0:
-            return first
-
-        # Fallback: some environments block GitHub remote components.
-        fallback_command = self._build_list_formats_command(url, enable_remote_components=False)
-        if is_frozen_runtime():
-            print(f"[DEBUG] Fallback command: {fallback_command}")
-        try:
-            second = subprocess.run(
-                fallback_command,
-                capture_output=True,
-                stdin=stdin_pipe,
-                creationflags=creationflags,
-                timeout=timeout,
-                **SUBPROCESS_TEXT_KWARGS,
-            )
-            if is_frozen_runtime():
-                print(f"[DEBUG] Fallback returncode: {second.returncode}")
-                print(f"[DEBUG] stdout: {second.stdout[:500] if second.stdout else 'empty'}")
-                print(f"[DEBUG] stderr: {second.stderr[:500] if second.stderr else 'empty'}")
-            return second
-        except FileNotFoundError as e:
-            raise RuntimeError(f"yt-dlp binary not found at: {fallback_command[0]}. Please reinstall the application.")
-        except OSError as e:
-            raise RuntimeError(f"Failed to run yt-dlp: {e}")
+        return first
 
     def _is_cookie_auth_failure(self, output: str) -> bool:
         lower = (output or '').lower()
@@ -396,15 +339,19 @@ class Downloader:
         # Add diagnostic info for frozen builds
         import logging
         if is_frozen_runtime():
-            from core.deps import get_runtime_diagnostics
             diag = get_runtime_diagnostics()
             logging.debug(f"[probe] Runtime diagnostics: {diag}")
-            yt_dlp_path = diag.get('yt-dlp_path')
-            if not yt_dlp_path or not diag.get('yt-dlp_exists'):
+            ytdlp_info = (diag.get('tools') or {}).get('yt-dlp') or {}
+            resolved_command = ytdlp_info.get('resolved_command') or []
+            yt_dlp_path = resolved_command[0] if resolved_command else None
+            if not yt_dlp_path:
                 return {
                     'valid': False,
                     'all_formats': [],
-                    'error': f"yt-dlp binary not found. Expected at: {yt_dlp_path or 'unknown'}. Search dirs: {diag.get('search_dirs')}",
+                    'error': (
+                        "yt-dlp binary not found. "
+                        f"Search dirs: {diag.get('runtime_bin_search_dirs')}"
+                    ),
                     'error_code': 'binary_not_found'
                 }
 
@@ -808,7 +755,6 @@ class Downloader:
             '--fragment-retries', '10',
             '--extractor-retries', '5',
             '--file-access-retries', '3',
-            '--remote-components', 'ejs:github',  # Enable JS challenge solver
             '-f', plan.selector,
             '-o', outtmpl,
         ] + self._yt_dlp_ffmpeg_args()

@@ -216,21 +216,15 @@ class CookieManager:
 
         try:
             # Make a simple test request to YouTube
-            cmd = [
-                'yt-dlp',
+            from core.deps import build_yt_dlp_command, is_frozen_runtime
+
+            cmd = (build_yt_dlp_command(allow_python_fallback=True) or ['yt-dlp']) + [
                 '--cookies', self.cookie_file,
                 '--skip-download',
                 '--quiet',
                 '--no-warnings',
                 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'  # Short test video
             ]
-
-            # Prefer bundled/runtime-resolved yt-dlp in packaged builds.
-            from core.downloader import resolve_runtime_tool
-            from core.deps import is_frozen_runtime
-            resolved = resolve_runtime_tool('yt-dlp', allow_python_module_fallback=True)
-            if resolved:
-                cmd = resolved + cmd[1:]
 
             # In frozen builds without a console, we need to explicitly set stdin to DEVNULL
             stdin_pipe = subprocess.DEVNULL if is_frozen_runtime() else None
@@ -249,5 +243,4 @@ class CookieManager:
             return result.returncode == 0
         except Exception:
             return False
-
 

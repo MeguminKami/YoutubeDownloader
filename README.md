@@ -27,7 +27,7 @@ YoutubeGrab gives you a clean queue-based workflow for downloading videos or aud
 Project dependencies from `requirements.txt`:
 
 - `customtkinter>=5.2.0`
-- `yt-dlp>=2024.11.18`
+- `yt-dlp[default]>=2024.11.18`
 - `Pillow>=10.2.0`
 
 ## Install (source)
@@ -83,33 +83,64 @@ Runtime cookie location is managed by `core/auth.py` and `utils/config_store.py`
 
 If FFmpeg is missing, the app raises a clear error and keeps the queue for retry.
 
-## Packaging (Windows executable)
+## Packaging and Releases
 
-The repository includes `YoutubeGrab.spec` for PyInstaller builds.
+Releases now use a one-folder PyInstaller layout on every platform instead of a brittle one-file build.
+
+Each packaged artifact includes a dedicated bundled runtime tool directory:
+
+- `runtime/bin/yt-dlp`
+- `runtime/bin/ffmpeg`
+- `runtime/bin/ffprobe`
+- `runtime/bin/deno`
+
+The app resolves these bundled tools first inside frozen builds, then falls back to system tools only in source-mode development.
+
+### Local Build Flow
+
+Install the build-only dependencies first:
 
 ```bat
 cd C:\Users\joaoc\Desktop\Projetos\YoutubeGrab
-pyinstaller YoutubeGrab.spec
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements-build.txt
 ```
 
-On Windows, this spec now generates two executables in `dist/`:
+Download the runtime tools for the target platform:
 
-- `YoutubeGrab.exe` (normal GUI build)
-- `YoutubeGrabDev.exe` (debug build with console/terminal output)
+```bat
+python packaging/download_runtime_tools.py --platform windows --output-dir .runtime\windows-x64
+```
 
-Release Windows zip artifacts include both executables so you can run `YoutubeGrabDev.exe` when you need startup/runtime logs.
+Build the frozen bundle:
 
-The spec expects Windows runtime tools to be available (or provided via env vars):
+```bat
+python packaging/build_release.py --platform windows --runtime-dir .runtime\windows-x64 --version v1.0.0
+```
 
-- `yt-dlp.exe`
-- `ffmpeg.exe`
-- `ffprobe.exe`
+Validate the finished artifact:
 
-Optional explicit environment variables recognized by the spec:
+```bat
+python packaging/validate_release.py --platform windows --dist-dir dist --probe-url https://www.youtube.com/watch?v=dQw4w9WgXcQ
+```
 
-- `YTDLP_EXE`
-- `FFMPEG_EXE`
-- `FFPROBE_EXE`
+### Release Outputs
+
+- Windows: `dist/YoutubeGrab/` with `YoutubeGrab.exe` and `YoutubeGrabDebug.exe`
+- macOS: `dist/YoutubeGrab.app`
+- Linux: `dist/YoutubeGrab/`
+
+The GitHub Actions release workflow builds all three tagged artifacts automatically and only publishes them after the frozen bundle passes its own `--self-check`.
+
+Current CI builds the macOS artifact on an Intel runner (`macos-15-intel`), so the published macOS bundle is `x64`. Apple Silicon users can run it with Rosetta.
+
+The macOS bundle is not code-signed or notarized. On first launch, users may need to remove the quarantine flag manually:
+
+```bash
+xattr -dr com.apple.quarantine YoutubeGrab.app
+```
 
 ## Troubleshooting
 
@@ -123,10 +154,13 @@ Optional explicit environment variables recognized by the spec:
   - The selected format changed upstream; choose another quality and retry.
 
 - **Merge fails**
-  - Confirm `ffmpeg` and `ffprobe` are installed and accessible.
+  - Confirm `ffmpeg` and `ffprobe` are available. Release bundles include both tools already.
 
 - **Packaged build reports missing tools**
   - Rebuild or reinstall with all required bundled binaries.
+
+- **Some YouTube pages fail with JS challenge/runtime errors**
+  - Confirm the bundled `deno` runtime is present in `runtime/bin`, or reinstall the release bundle.
 
 ## Security and Robustness Notes
 
@@ -149,6 +183,10 @@ YoutubeGrab/
     auth.py             # cookies.txt handling and validation
     deps.py             # runtime tool resolution and checks
     models.py           # queue/history dataclasses
+  packaging/
+    download_runtime_tools.py  # fetches/bundles yt-dlp, ffmpeg, ffprobe, deno
+    build_release.py           # PyInstaller release builder
+    validate_release.py        # frozen artifact smoke checks
   ui/
     dialogs.py          # Installer/options/progress dialogs
     theme.py            # color system
@@ -157,6 +195,7 @@ YoutubeGrab/
     config_store.py     # app data + JSON state storage
     history_store.py    # persistent download history
     thumbnail_cache.py  # cached thumbnail management
+  requirements-build.txt # build-only Python dependencies
 ```
 
 ## Development Notes

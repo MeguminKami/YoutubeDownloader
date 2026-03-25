@@ -9,6 +9,8 @@ from typing import Dict, Optional, Tuple, Union
 import customtkinter as ctk
 from PIL import Image, ImageColor, ImageDraw, ImageOps, ImageTk
 
+from core.deps import find_bundled_resource
+
 
 ColorLike = Union[str, Tuple[int, int, int], Tuple[int, int, int, int]]
 
@@ -40,7 +42,10 @@ class VisualAssets:
 
     def __init__(self, colors):
         self.colors = colors
-        self._logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        self._logo_path = (
+            find_bundled_resource("ui", "logo.png")
+            or os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        )
         self._render_scale = 2
         self._image_cache: Dict[Tuple, ctk.CTkImage] = {}
 

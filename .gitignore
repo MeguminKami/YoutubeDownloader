@@ -6,3 +6,7 @@ __pycache__/
 build/
 dist/
 ui/logo.ico
+.pyinstaller-cache/
+.runtime/
+.runtime-test/
+.venv-packaging/
