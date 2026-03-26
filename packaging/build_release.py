@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-APP_NAME = "YoutubeGrab"
+DIST_NAME = "YTGrab"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -38,7 +38,7 @@ def _build_asset_dir(platform: str) -> Path:
 def _build_windows_icon(asset_dir: Path) -> Path:
     from PIL import Image
 
-    icon_path = asset_dir / "YoutubeGrab.ico"
+    icon_path = asset_dir / "YTGrab.ico"
     with Image.open(_logo_png()) as image:
         image.save(
             icon_path,
@@ -57,7 +57,7 @@ def _runtime_dir(path: str) -> Path:
 
 
 def _expected_output(platform: str, dist_dir: Path) -> Path:
-    return dist_dir / APP_NAME
+    return dist_dir / DIST_NAME
 
 
 def _set_execute_bits(bundle_path: Path) -> None:
@@ -90,7 +90,6 @@ def main() -> int:
             output_path.unlink()
 
     env = os.environ.copy()
-    env["YTG_APP_NAME"] = APP_NAME
     env["YTG_APP_VERSION"] = args.version
     env["YTG_RUNTIME_DIR"] = str(runtime_dir)
     env["PYINSTALLER_CONFIG_DIR"] = str(ROOT / ".pyinstaller-cache" / args.platform)

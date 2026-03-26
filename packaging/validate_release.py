@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 
 
-APP_NAME = "YoutubeGrab"
+DIST_NAME = "YTGrab"
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate a built YoutubeGrab release artifact.")
+    parser = argparse.ArgumentParser(description="Validate a built YTGrab release artifact.")
     parser.add_argument("--platform", required=True, choices=("windows", "linux"))
     parser.add_argument("--dist-dir", required=True)
     parser.add_argument("--probe-url")
@@ -20,18 +20,18 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _artifact_root(platform: str, dist_dir: Path) -> Path:
-    return dist_dir / APP_NAME
+    return dist_dir / DIST_NAME
 
 
 def _main_executable(platform: str, dist_dir: Path) -> Path:
     if platform == "windows":
-        return dist_dir / APP_NAME / f"{APP_NAME}.exe"
-    return dist_dir / APP_NAME / APP_NAME
+        return dist_dir / DIST_NAME / f"{DIST_NAME}.exe"
+    return dist_dir / DIST_NAME / DIST_NAME
 
 
 def _debug_executable(platform: str, dist_dir: Path) -> Path | None:
     if platform == "windows":
-        return dist_dir / APP_NAME / f"{APP_NAME}Debug.exe"
+        return dist_dir / DIST_NAME / f"{DIST_NAME}Debug.exe"
     return None
 
 

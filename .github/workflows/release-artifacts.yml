@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  APP_NAME: YoutubeGrab
+  DIST_NAME: YTGrab
   PYTHON_VERSION: "3.12"
   SMOKE_URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
@@ -115,26 +115,40 @@ jobs:
         run: |
           Get-ChildItem -Recurse dist | Select-Object FullName, Length
 
-      - name: Package Windows artifact
+      - name: Package Windows artifacts
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $artifactBase = "$env:APP_NAME-$env:GITHUB_REF_NAME-${{ matrix.platform }}-${{ matrix.arch }}"
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
-          Compress-Archive -Path "dist\$env:APP_NAME" -DestinationPath "release-assets\$artifactBase.zip" -Force
+          $version = $env:GITHUB_REF_NAME
+          $distName = $env:DIST_NAME
+
+          # Create normal release (without debug exe)
+          $normalDir = "release-staging/normal/$distName"
+          New-Item -ItemType Directory -Path $normalDir -Force | Out-Null
+          Copy-Item -Path "dist/$distName/*" -Destination $normalDir -Recurse
+          Remove-Item -Path "$normalDir/${distName}Debug.exe" -Force
+          Compress-Archive -Path "release-staging/normal/$distName" -DestinationPath "release-assets/$distName-$version-windows-x64.zip" -Force
+
+          # Create debug release (without normal exe)
+          $debugDir = "release-staging/debug/$distName"
+          New-Item -ItemType Directory -Path $debugDir -Force | Out-Null
+          Copy-Item -Path "dist/$distName/*" -Destination $debugDir -Recurse
+          Remove-Item -Path "$debugDir/${distName}.exe" -Force
+          Compress-Archive -Path "release-staging/debug/$distName" -DestinationPath "release-assets/$distName-$version-windows-x64-debug.zip" -Force
 
       - name: Package Linux artifact
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          artifact_base="${APP_NAME}-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
+          artifact_base="${DIST_NAME}-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
           mkdir -p release-assets
-          tar -C dist -czf "release-assets/${artifact_base}.tar.gz" "${APP_NAME}"
+          tar -C dist -czf "release-assets/${artifact_base}.tar.gz" "${DIST_NAME}"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.APP_NAME }}-${{ matrix.platform }}-${{ matrix.arch }}
+          name: ${{ env.DIST_NAME }}-${{ matrix.platform }}-${{ matrix.arch }}
           path: release-assets/*
           if-no-files-found: error
 
@@ -155,8 +169,8 @@ jobs:
         run: |
           shopt -s nullglob
           files=(release-assets/*)
-          if [ ${#files[@]} -ne 2 ]; then
-            echo "Expected exactly 2 release artifacts, found ${#files[@]}"
+          if [ ${#files[@]} -ne 3 ]; then
+            echo "Expected exactly 3 release artifacts, found ${#files[@]}"
             ls -la release-assets || true
             exit 1
           fi

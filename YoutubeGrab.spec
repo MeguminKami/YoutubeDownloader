@@ -21,7 +21,7 @@ def _spec_root() -> Path:
 
 
 ROOT = _spec_root()
-APP_NAME = os.environ.get("YTG_APP_NAME", "YoutubeGrab")
+DIST_NAME = "YTGrab"
 APP_VERSION = os.environ.get("YTG_APP_VERSION", "0.0.0")
 RUNTIME_DIR = Path(os.environ.get("YTG_RUNTIME_DIR", ROOT / ".runtime")).resolve()
 WINDOWS_ICON = os.environ.get("YTG_WINDOWS_ICON")
@@ -103,7 +103,7 @@ if sys.platform == "win32":
         a.scripts,
         [],
         exclude_binaries=True,
-        name=APP_NAME,
+        name=DIST_NAME,
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -122,7 +122,7 @@ if sys.platform == "win32":
         a.scripts,
         [],
         exclude_binaries=True,
-        name=f"{APP_NAME}Debug",
+        name=f"{DIST_NAME}Debug",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -143,7 +143,7 @@ if sys.platform == "win32":
         a.datas,
         strip=False,
         upx=False,
-        name=APP_NAME,
+        name=DIST_NAME,
     )
 
 else:
@@ -152,7 +152,7 @@ else:
         a.scripts,
         [],
         exclude_binaries=True,
-        name=APP_NAME,
+        name=DIST_NAME,
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -172,5 +172,5 @@ else:
         a.datas,
         strip=False,
         upx=False,
-        name=APP_NAME,
+        name=DIST_NAME,
     )

@@ -1,197 +1,312 @@
-# YoutubeGrab
+<p align="center">
+  <img src="ui/logo.png" alt="YTGrab Logo" width="120" height="120">
+</p>
 
-A modern desktop YouTube downloader built with Python and CustomTkinter.
+<h1 align="center">YTGrab</h1>
 
-YoutubeGrab gives you a clean queue-based workflow for downloading videos or audio, with progress tracking, cookie-based authentication support, and persistent history.
+<p align="center">
+  <strong>A modern, queue-based YouTube downloader for Windows and Linux</strong>
+</p>
 
-## Highlights
+<p align="center">
+  <a href="https://github.com/joaoc/YoutubeGrab/releases/latest">
+    <img src="https://img.shields.io/badge/Download-Latest%20Release-cc0000?style=for-the-badge&logo=github" alt="Download">
+  </a>
+</p>
 
-- Clean desktop UI built with `customtkinter`
-- Queue multiple items before starting downloads
-- Download as video or extract audio (`mp3`)
-- Format-aware quality picker based on `yt-dlp --list-formats`
-- Supports single videos and playlists
-- Optional playlist merge (single output file)
-- Cookie input and validation flow for restricted/private videos
-- Download history with saved metadata and thumbnail caching
-- Cancel-in-progress with session file cleanup
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%20|%20Linux-333333?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/License-MIT-555555?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/Python-3.10+-666666?style=flat-square&logo=python&logoColor=white" alt="Python">
+</p>
 
-## Requirements
+---
 
-- Python 3.10+ (recommended)
-- `yt-dlp`
-- `customtkinter`
-- `Pillow`
-- `ffmpeg` and `ffprobe` (required for merge workflows)
+## Overview
 
-Project dependencies from `requirements.txt`:
+YTGrab provides a clean desktop interface for downloading YouTube videos and audio. Queue multiple items, choose your preferred quality, and download everything with a single click.
 
-- `customtkinter>=5.2.0`
-- `yt-dlp[default]>=2024.11.18`
-- `Pillow>=10.2.0`
+**No terminal required.** Just download, extract, and run.
 
-## Install (source)
+---
 
-```bat
-cd C:\Users\joaoc\Desktop\Projetos\YoutubeGrab
-python -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+## Quick Navigation
+
+| Section | Description |
+|---------|-------------|
+| [Download](#download) | Get the latest release |
+| [Features](#features) | What YTGrab can do |
+| [How to Use](#how-to-use) | Step-by-step guide |
+| [Cookie Authentication](#cookie-authentication) | Access restricted content |
+| [Troubleshooting](#troubleshooting) | Common issues and fixes |
+| [For Developers](#for-developers) | Build from source |
+
+---
+
+## Download
+
+### Ready-to-Use Releases
+
+Download the latest version for your platform. No installation required — just extract and run.
+
+| Platform | Download | Notes |
+|----------|----------|-------|
+| **Windows** | `YTGrab-vX.X.X-windows-x64.zip` | Standard release |
+| **Windows Debug** | `YTGrab-vX.X.X-windows-x64-debug.zip` | Console window for troubleshooting |
+| **Linux** | `YTGrab-vX.X.X-linux-x64.tar.gz` | x64 only |
+
+<p align="center">
+  <a href="https://github.com/joaoc/YoutubeGrab/releases/latest">
+    <img src="https://img.shields.io/badge/Go%20to%20Releases-cc0000?style=for-the-badge" alt="Releases">
+  </a>
+</p>
+
+### What's Included
+
+Each release is fully self-contained with all required tools bundled:
+
+```
+YTGrab/
+├── YTGrab.exe          # Main application
+├── _internal/          # Python runtime
+└── runtime/
+    └── bin/
+        ├── yt-dlp      # Video extraction
+        ├── ffmpeg      # Media processing
+        ├── ffprobe     # Format detection
+        └── deno        # JavaScript runtime
 ```
 
-## Run
+---
 
-```bat
-cd C:\Users\joaoc\Desktop\Projetos\YoutubeGrab
-python main.py
-```
+## Features
+
+### Core Functionality
+
+| Feature | Description |
+|---------|-------------|
+| **Queue System** | Add multiple videos before downloading |
+| **Video Download** | Choose from available quality options |
+| **Audio Extraction** | Extract MP3 audio from any video |
+| **Playlist Support** | Download entire playlists at once |
+| **Playlist Merge** | Combine playlist items into a single file |
+| **Progress Tracking** | Real-time download progress for each item |
+| **Download History** | Track completed and failed downloads |
+| **Thumbnail Cache** | Preview thumbnails for queued items |
+
+### Supported Content
+
+- Single videos
+- YouTube Shorts
+- Full playlists
+- Age-restricted content (with cookies)
+- Private videos (with cookies)
+
+---
 
 ## How to Use
 
-1. Launch the app.
-2. Paste a YouTube URL (video, shorts, or playlist).
-3. Click **Queue** to fetch details and open options.
+### Basic Workflow
+
+```
+1. Launch YTGrab
+       ↓
+2. Paste YouTube URL
+       ↓
+3. Click "Queue" to fetch video details
+       ↓
 4. Choose download type:
-   - **Video**: pick quality/format
-   - **Audio**: choose bitrate
-5. Add item(s) to queue.
-6. Click **Download All** and choose an output folder.
-
-The app tracks each item status (`queued`, `downloading`, `completed`, `failed`) and saves completed/failed history entries.
-
-## Cookies Authentication
-
-Some YouTube content requires account cookies. YoutubeGrab includes a cookie workflow in-app:
-
-- Use the **Insert Cookies** button in the top bar.
-- Paste or replace `cookies.txt` content.
-- The app validates cookies using a `yt-dlp` probe request.
-
-Runtime cookie location is managed by `core/auth.py` and `utils/config_store.py`, typically under:
-
-- `%APPDATA%\YTGrab` (Windows)
-- `~/.config/YTGrab` (fallback)
-- `./.ytgrab` (fallback)
-
-## FFmpeg Notes
-
-`ffmpeg`/`ffprobe` are required when:
-
-- Selected quality uses separate video-only + audio-only streams
-- Merging playlist items into one final file
-
-If FFmpeg is missing, the app raises a clear error and keeps the queue for retry.
-
-## Packaging and Releases
-
-Releases now use a one-folder PyInstaller layout on every platform instead of a brittle one-file build.
-
-Each packaged artifact includes a dedicated bundled runtime tool directory:
-
-- `runtime/bin/yt-dlp`
-- `runtime/bin/ffmpeg`
-- `runtime/bin/ffprobe`
-- `runtime/bin/deno`
-
-The app resolves these bundled tools first inside frozen builds, then falls back to system tools only in source-mode development.
-
-### Local Build Flow
-
-Install the build-only dependencies first:
-
-```bat
-cd C:\Users\joaoc\Desktop\Projetos\YoutubeGrab
-python -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements-build.txt
+   • Video → Select quality/format
+   • Audio → Select bitrate
+       ↓
+5. Add to queue (repeat for more items)
+       ↓
+6. Click "Download All"
+       ↓
+7. Select output folder
+       ↓
+8. Done!
 ```
 
-Download the runtime tools for the target platform:
+### Download Types
 
-```bat
-python packaging/download_runtime_tools.py --platform windows --output-dir .runtime\windows-x64
-```
+| Type | Options | Output |
+|------|---------|--------|
+| **Video** | 144p to 4K+ (based on availability) | `.mp4`, `.webm`, `.mkv` |
+| **Audio** | Various bitrates | `.mp3` |
 
-Build the frozen bundle:
+### Status Indicators
 
-```bat
-python packaging/build_release.py --platform windows --runtime-dir .runtime\windows-x64 --version v1.0.0
-```
+| Status | Meaning |
+|--------|---------|
+| `Queued` | Waiting to download |
+| `Downloading` | Currently in progress |
+| `Completed` | Successfully finished |
+| `Failed` | Error occurred (check logs) |
 
-Validate the finished artifact:
+---
 
-```bat
-python packaging/validate_release.py --platform windows --dist-dir dist --probe-url https://www.youtube.com/watch?v=dQw4w9WgXcQ
-```
+## Cookie Authentication
 
-### Release Outputs
+Some YouTube content requires account authentication:
 
-- Windows: `dist/YoutubeGrab/` with `YoutubeGrab.exe` and `YoutubeGrabDebug.exe`
-- Linux: `dist/YoutubeGrab/`
+- Age-restricted videos
+- Private videos
+- Member-only content
 
-The GitHub Actions release workflow builds both tagged artifacts automatically and only publishes them after the frozen bundle passes its own `--self-check`.
+### How to Add Cookies
+
+1. Click **Insert Cookies** in the top bar
+2. Paste your `cookies.txt` content
+3. The app validates cookies automatically
+
+### Getting Cookies
+
+Use a browser extension like **Get cookies.txt LOCALLY** to export your YouTube cookies in Netscape format.
+
+### Cookie Storage Location
+
+| Platform | Location |
+|----------|----------|
+| Windows | `%APPDATA%\YTGrab\cookies.txt` |
+| Linux | `~/.config/YTGrab/cookies.txt` |
+
+---
 
 ## Troubleshooting
 
-- **"yt-dlp is not installed"**
-  - Install dependencies with `pip install -r requirements.txt`.
+<details>
+<summary><strong>"yt-dlp is not installed"</strong></summary>
 
-- **Cookie validation fails / "sign in to confirm you're not a bot"**
-  - Refresh and replace `cookies.txt` from a logged-in browser session.
+This should not happen with release builds. If running from source, install dependencies:
+```bash
+pip install -r requirements.txt
+```
+</details>
 
-- **"Requested format is not available"**
-  - The selected format changed upstream; choose another quality and retry.
+<details>
+<summary><strong>Cookie validation fails / "sign in to confirm you're not a bot"</strong></summary>
 
-- **Merge fails**
-  - Confirm `ffmpeg` and `ffprobe` are available. Release bundles include both tools already.
+Your cookies have expired. Export fresh cookies from your browser and replace them in the app.
+</details>
 
-- **Packaged build reports missing tools**
-  - Rebuild or reinstall with all required bundled binaries.
+<details>
+<summary><strong>"Requested format is not available"</strong></summary>
 
-- **Some YouTube pages fail with JS challenge/runtime errors**
-  - Confirm the bundled `deno` runtime is present in `runtime/bin`, or reinstall the release bundle.
+The selected quality option is no longer available. Choose a different quality and try again.
+</details>
 
-## Security and Robustness Notes
+<details>
+<summary><strong>Merge fails</strong></summary>
 
-Current download pipeline includes safeguards such as:
+FFmpeg is required for merging video and audio streams. Release builds include FFmpeg automatically.
+</details>
 
-- URL scheme/domain validation
-- Blocking localhost/private-network targets
-- Output filename sanitization
-- Controlled subprocess invocation with timeouts/retries
-- Cleanup of partial files on cancellation
+<details>
+<summary><strong>JS challenge / runtime errors</strong></summary>
 
-## Project Structure
+Some YouTube pages require JavaScript execution. Ensure the bundled Deno runtime is present in `runtime/bin/`.
+</details>
 
-```text
-YoutubeGrab/
-  app.py                # Main UI app
-  main.py               # Entry point
-  core/
-    downloader.py       # yt-dlp/ffmpeg pipeline and format logic
-    auth.py             # cookies.txt handling and validation
-    deps.py             # runtime tool resolution and checks
-    models.py           # queue/history dataclasses
-  packaging/
-    download_runtime_tools.py  # fetches/bundles yt-dlp, ffmpeg, ffprobe, deno
-    build_release.py           # PyInstaller release builder
-    validate_release.py        # frozen artifact smoke checks
-  ui/
-    dialogs.py          # Installer/options/progress dialogs
-    theme.py            # color system
-    visual_assets.py    # generated icons/tiles/images
-  utils/
-    config_store.py     # app data + JSON state storage
-    history_store.py    # persistent download history
-    thumbnail_cache.py  # cached thumbnail management
-  requirements-build.txt # build-only Python dependencies
+---
+
+## For Developers
+
+<details>
+<summary><strong>Click to expand developer documentation</strong></summary>
+
+### Requirements
+
+- Python 3.10+
+- `yt-dlp`
+- `customtkinter`
+- `Pillow`
+- `ffmpeg` and `ffprobe`
+
+### Install from Source
+
+```bash
+git clone https://github.com/joaoc/YoutubeGrab.git
+cd YoutubeGrab
+
+python -m venv .venv
+source .venv/bin/activate  # Linux
+# or: .venv\Scripts\activate  # Windows
+
+pip install -r requirements.txt
 ```
 
-## Development Notes
+### Run
 
-- Entry point: `main.py`
-- Main window class: `YoutubeGrabApp` in `app.py`
-- Core downloader class: `Downloader` in `core/downloader.py`
+```bash
+python main.py
+```
 
+### Building Releases
+
+Install build dependencies:
+
+```bash
+pip install -r requirements-build.txt
+```
+
+Download runtime tools:
+
+```bash
+python packaging/download_runtime_tools.py --platform windows --output-dir .runtime/windows-x64
+```
+
+Build the release:
+
+```bash
+python packaging/build_release.py --platform windows --runtime-dir .runtime/windows-x64 --version v1.0.0
+```
+
+Validate the build:
+
+```bash
+python packaging/validate_release.py --platform windows --dist-dir dist
+```
+
+### Project Structure
+
+```
+YoutubeGrab/
+├── main.py                 # Entry point
+├── app.py                  # Main UI application
+├── core/
+│   ├── downloader.py       # yt-dlp/ffmpeg pipeline
+│   ├── auth.py             # Cookie handling
+│   ├── deps.py             # Runtime tool resolution
+│   └── models.py           # Data models
+├── packaging/
+│   ├── download_runtime_tools.py
+│   ├── build_release.py
+│   └── validate_release.py
+├── ui/
+│   ├── dialogs.py          # UI dialogs
+│   ├── theme.py            # Color system
+│   └── visual_assets.py    # Generated assets
+└── utils/
+    ├── config_store.py     # Configuration storage
+    ├── history_store.py    # Download history
+    └── thumbnail_cache.py  # Thumbnail management
+```
+
+### Security Notes
+
+The download pipeline includes:
+
+- URL scheme and domain validation
+- Localhost/private network blocking
+- Output filename sanitization
+- Subprocess timeouts and retries
+- Partial file cleanup on cancellation
+
+</details>
+
+---
+
+<p align="center">
+  <sub>Built with Python, CustomTkinter, and yt-dlp</sub>
+</p>

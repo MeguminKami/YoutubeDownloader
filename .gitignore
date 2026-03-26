@@ -1,11 +1,116 @@
-cookies.txt
-cache/
-.ytgrab/
+# ===========================
+# Python
+# ===========================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+*.manifest
+*.spec.bak
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+ENV/
+env/
+
+# ===========================
+# Build & Distribution
+# ===========================
 build/
 dist/
-ui/logo.ico
+release-staging/
+release-assets/
+*.exe
+*.app
+*.dmg
+*.msi
+
+# PyInstaller
 .pyinstaller-cache/
+*.spec.bak
+
+# Runtime tools (downloaded during build)
+.runtime/
+.runtime-*/
 .runtime*/
-.venv-packaging/
+
+# ===========================
+# IDE & Editors
+# ===========================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ===========================
+# OS Generated
+# ===========================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.directory
+
+# ===========================
+# App Data (user-specific)
+# ===========================
+# Cookies (sensitive)
+cookies.txt
+*.cookies
+
+# App config and cache
+.ytgrab/
+cache/
+thumbnails/
+history.json
+
+# ===========================
+# Testing
+# ===========================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ===========================
+# Misc
+# ===========================
+*.log
+*.bak
+*.tmp
+*.temp
+.env
+.env.*
+!.env.example
