@@ -129,18 +129,9 @@ python packaging/validate_release.py --platform windows --dist-dir dist --probe-
 ### Release Outputs
 
 - Windows: `dist/YoutubeGrab/` with `YoutubeGrab.exe` and `YoutubeGrabDebug.exe`
-- macOS: `dist/YoutubeGrab.app`
 - Linux: `dist/YoutubeGrab/`
 
-The GitHub Actions release workflow builds all three tagged artifacts automatically and only publishes them after the frozen bundle passes its own `--self-check`.
-
-Current CI builds the macOS artifact on an Intel runner (`macos-15-intel`), so the published macOS bundle is `x64`. Apple Silicon users can run it with Rosetta.
-
-The macOS bundle is not code-signed or notarized. On first launch, users may need to remove the quarantine flag manually:
-
-```bash
-xattr -dr com.apple.quarantine YoutubeGrab.app
-```
+The GitHub Actions release workflow builds both tagged artifacts automatically and only publishes them after the frozen bundle passes its own `--self-check`.
 
 ## Troubleshooting
 

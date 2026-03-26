@@ -25,8 +25,6 @@ APP_NAME = os.environ.get("YTG_APP_NAME", "YoutubeGrab")
 APP_VERSION = os.environ.get("YTG_APP_VERSION", "0.0.0")
 RUNTIME_DIR = Path(os.environ.get("YTG_RUNTIME_DIR", ROOT / ".runtime")).resolve()
 WINDOWS_ICON = os.environ.get("YTG_WINDOWS_ICON")
-MACOS_ICON = os.environ.get("YTG_MACOS_ICON")
-MACOS_BUNDLE_ID = os.environ.get("YTG_MACOS_BUNDLE_ID", "com.joaoc.youtubegrab")
 
 
 def _dedupe_entries(entries):
@@ -146,50 +144,6 @@ if sys.platform == "win32":
         strip=False,
         upx=False,
         name=APP_NAME,
-    )
-
-elif sys.platform == "darwin":
-    exe = EXE(
-        pyz,
-        a.scripts,
-        [],
-        exclude_binaries=True,
-        name=APP_NAME,
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=False,
-        console=False,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-        icon=MACOS_ICON or None,
-    )
-
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        strip=False,
-        upx=False,
-        name=APP_NAME,
-    )
-
-    app = BUNDLE(
-        coll,
-        name=f"{APP_NAME}.app",
-        icon=MACOS_ICON or None,
-        bundle_identifier=MACOS_BUNDLE_ID,
-        version=APP_VERSION,
-        info_plist={
-            "CFBundleName": APP_NAME,
-            "CFBundleDisplayName": APP_NAME,
-            "CFBundleShortVersionString": APP_VERSION,
-            "CFBundleVersion": APP_VERSION,
-            "NSHighResolutionCapable": "True",
-        },
     )
 
 else:

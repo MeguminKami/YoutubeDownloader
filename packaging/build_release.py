@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -15,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a release bundle with PyInstaller.")
-    parser.add_argument("--platform", required=True, choices=("windows", "macos", "linux"))
+    parser.add_argument("--platform", required=True, choices=("windows", "linux"))
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--dist-dir", default=str(ROOT / "dist"))
@@ -49,45 +48,6 @@ def _build_windows_icon(asset_dir: Path) -> Path:
     return icon_path
 
 
-def _build_macos_icon(asset_dir: Path) -> Path | None:
-    iconutil = shutil.which("iconutil")
-    if not iconutil:
-        return None
-
-    from PIL import Image
-
-    icon_path = asset_dir / "YoutubeGrab.icns"
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        iconset_dir = Path(temp_dir) / "YoutubeGrab.iconset"
-        iconset_dir.mkdir(parents=True, exist_ok=True)
-
-        size_map = {
-            "icon_16x16.png": 16,
-            "icon_16x16@2x.png": 32,
-            "icon_32x32.png": 32,
-            "icon_32x32@2x.png": 64,
-            "icon_128x128.png": 128,
-            "icon_128x128@2x.png": 256,
-            "icon_256x256.png": 256,
-            "icon_256x256@2x.png": 512,
-            "icon_512x512.png": 512,
-            "icon_512x512@2x.png": 1024,
-        }
-
-        with Image.open(_logo_png()) as image:
-            rgba = image.convert("RGBA")
-            for file_name, size in size_map.items():
-                rgba.resize((size, size), Image.Resampling.LANCZOS).save(iconset_dir / file_name)
-
-        subprocess.run(
-            [iconutil, "-c", "icns", str(iconset_dir), "-o", str(icon_path)],
-            check=True,
-        )
-
-    return icon_path if icon_path.is_file() else None
-
-
 def _runtime_dir(path: str) -> Path:
     runtime_dir = Path(path).resolve()
     runtime_bin_dir = runtime_dir / "bin"
@@ -97,8 +57,6 @@ def _runtime_dir(path: str) -> Path:
 
 
 def _expected_output(platform: str, dist_dir: Path) -> Path:
-    if platform == "macos":
-        return dist_dir / f"{APP_NAME}.app"
     return dist_dir / APP_NAME
 
 
@@ -135,15 +93,10 @@ def main() -> int:
     env["YTG_APP_NAME"] = APP_NAME
     env["YTG_APP_VERSION"] = args.version
     env["YTG_RUNTIME_DIR"] = str(runtime_dir)
-    env["YTG_MACOS_BUNDLE_ID"] = "com.joaoc.youtubegrab"
     env["PYINSTALLER_CONFIG_DIR"] = str(ROOT / ".pyinstaller-cache" / args.platform)
 
     if args.platform == "windows":
         env["YTG_WINDOWS_ICON"] = str(_build_windows_icon(asset_dir))
-    elif args.platform == "macos":
-        macos_icon = _build_macos_icon(asset_dir)
-        if macos_icon:
-            env["YTG_MACOS_ICON"] = str(macos_icon)
 
     command = [
         sys.executable,

@@ -27,12 +27,6 @@ jobs:
             runtime_dir: .runtime/windows-x64
             asset_ext: zip
             online_probe: false
-          - platform: macos
-            os: macos-15-intel
-            arch: x64
-            runtime_dir: .runtime/macos-x64
-            asset_ext: zip
-            online_probe: false
           - platform: linux
             os: ubuntu-latest
             arch: x64
@@ -129,14 +123,6 @@ jobs:
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
           Compress-Archive -Path "dist\$env:APP_NAME" -DestinationPath "release-assets\$artifactBase.zip" -Force
 
-      - name: Package macOS artifact
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          artifact_base="${APP_NAME}-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}"
-          mkdir -p release-assets
-          ditto -c -k --keepParent "dist/${APP_NAME}.app" "release-assets/${artifact_base}.zip"
-
       - name: Package Linux artifact
         if: matrix.platform == 'linux'
         shell: bash
@@ -169,8 +155,8 @@ jobs:
         run: |
           shopt -s nullglob
           files=(release-assets/*)
-          if [ ${#files[@]} -ne 3 ]; then
-            echo "Expected exactly 3 release artifacts, found ${#files[@]}"
+          if [ ${#files[@]} -ne 2 ]; then
+            echo "Expected exactly 2 release artifacts, found ${#files[@]}"
             ls -la release-assets || true
             exit 1
           fi
@@ -179,7 +165,7 @@ jobs:
             [ -s "$file" ] || { echo "Artifact is empty: $file"; exit 1; }
             base="$(basename "$file")"
             [[ "$base" == *"-${GITHUB_REF_NAME}-"* ]] || { echo "Version missing from asset name: $base"; exit 1; }
-            [[ "$base" == *"-windows-"* || "$base" == *"-macos-"* || "$base" == *"-linux-"* ]] || { echo "Platform missing from asset name: $base"; exit 1; }
+            [[ "$base" == *"-windows-"* || "$base" == *"-linux-"* ]] || { echo "Platform missing from asset name: $base"; exit 1; }
           done
 
           ls -la release-assets

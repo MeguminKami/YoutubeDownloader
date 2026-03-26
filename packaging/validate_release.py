@@ -13,24 +13,20 @@ APP_NAME = "YoutubeGrab"
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate a built YoutubeGrab release artifact.")
-    parser.add_argument("--platform", required=True, choices=("windows", "macos", "linux"))
+    parser.add_argument("--platform", required=True, choices=("windows", "linux"))
     parser.add_argument("--dist-dir", required=True)
     parser.add_argument("--probe-url")
     return parser.parse_args()
 
 
 def _artifact_root(platform: str, dist_dir: Path) -> Path:
-    if platform == "macos":
-        return dist_dir / f"{APP_NAME}.app"
     return dist_dir / APP_NAME
 
 
 def _main_executable(platform: str, dist_dir: Path) -> Path:
     if platform == "windows":
         return dist_dir / APP_NAME / f"{APP_NAME}.exe"
-    if platform == "linux":
-        return dist_dir / APP_NAME / APP_NAME
-    return dist_dir / f"{APP_NAME}.app" / "Contents" / "MacOS" / APP_NAME
+    return dist_dir / APP_NAME / APP_NAME
 
 
 def _debug_executable(platform: str, dist_dir: Path) -> Path | None:
@@ -93,11 +89,6 @@ def main() -> int:
         debug_report = _run_self_check(debug_executable, None)
         if not debug_report.get("ok"):
             raise RuntimeError(json.dumps(debug_report, indent=2))
-
-    if args.platform == "macos":
-        plist_path = artifact_root / "Contents" / "Info.plist"
-        if not plist_path.is_file():
-            raise FileNotFoundError(f"macOS bundle is missing Info.plist: {plist_path}")
 
     summary = {
         "ok": main_report.get("ok"),

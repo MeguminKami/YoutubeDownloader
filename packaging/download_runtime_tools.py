@@ -21,7 +21,7 @@ GITHUB_LATEST_DOWNLOAD = "https://github.com/{repo}/releases/latest/download/{as
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download and validate bundled runtime tools.")
-    parser.add_argument("--platform", required=True, choices=("windows", "macos", "linux"))
+    parser.add_argument("--platform", required=True, choices=("windows", "linux"))
     parser.add_argument("--arch", default="x64", choices=("x64",))
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
@@ -117,7 +117,6 @@ def _install_yt_dlp(platform: str, bin_dir: Path) -> dict:
     candidate_names = {
         "windows": ["yt-dlp.exe"],
         "linux": ["yt-dlp_linux"],
-        "macos": ["yt-dlp_macos", "yt-dlp"],
     }[platform]
 
     destination_name = "yt-dlp.exe" if platform == "windows" else "yt-dlp"
@@ -139,7 +138,6 @@ def _install_deno(platform: str, bin_dir: Path, temp_dir: Path) -> dict:
     asset_name = {
         "windows": "deno-x86_64-pc-windows-msvc.zip",
         "linux": "deno-x86_64-unknown-linux-gnu.zip",
-        "macos": "deno-x86_64-apple-darwin.zip",
     }[platform]
 
     archive_path = temp_dir / asset_name
@@ -236,58 +234,10 @@ def _install_ffmpeg_linux(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
     }
 
 
-def _install_ffmpeg_macos(bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
-    ffmpeg_archive = temp_dir / "ffmpeg-macos.zip"
-    ffprobe_archive = temp_dir / "ffprobe-macos.zip"
-
-    ffmpeg_url = "https://evermeet.cx/ffmpeg/getrelease/zip"
-    ffprobe_url = "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
-
-    _download_file(ffmpeg_url, ffmpeg_archive)
-    _download_file(ffprobe_url, ffprobe_archive)
-
-    ffmpeg_extract = temp_dir / "ffmpeg-macos"
-    ffprobe_extract = temp_dir / "ffprobe-macos"
-    ffmpeg_extract.mkdir(parents=True, exist_ok=True)
-    ffprobe_extract.mkdir(parents=True, exist_ok=True)
-
-    _extract_zip(ffmpeg_archive, ffmpeg_extract)
-    _extract_zip(ffprobe_archive, ffprobe_extract)
-
-    ffmpeg_binary = _find_file(ffmpeg_extract, "ffmpeg")
-    ffprobe_binary = _find_file(ffprobe_extract, "ffprobe")
-
-    target_ffmpeg = bin_dir / "ffmpeg"
-    target_ffprobe = bin_dir / "ffprobe"
-    shutil.copy2(ffmpeg_binary, target_ffmpeg)
-    shutil.copy2(ffprobe_binary, target_ffprobe)
-    _make_executable(target_ffmpeg)
-    _make_executable(target_ffprobe)
-
-    return {
-        "ffmpeg": {
-            "path": target_ffmpeg,
-            "asset_name": ffmpeg_binary.name,
-            "source_url": ffmpeg_url,
-            "version": _run_version(target_ffmpeg, ["-version"]),
-            "sha256": _sha256(target_ffmpeg),
-        },
-        "ffprobe": {
-            "path": target_ffprobe,
-            "asset_name": ffprobe_binary.name,
-            "source_url": ffprobe_url,
-            "version": _run_version(target_ffprobe, ["-version"]),
-            "sha256": _sha256(target_ffprobe),
-        },
-    }
-
-
 def _install_ffmpeg(platform: str, bin_dir: Path, temp_dir: Path) -> dict[str, dict]:
     if platform == "windows":
         return _install_ffmpeg_windows(bin_dir, temp_dir)
-    if platform == "linux":
-        return _install_ffmpeg_linux(bin_dir, temp_dir)
-    return _install_ffmpeg_macos(bin_dir, temp_dir)
+    return _install_ffmpeg_linux(bin_dir, temp_dir)
 
 
 def main() -> int:
